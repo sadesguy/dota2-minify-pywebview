@@ -1,6 +1,6 @@
 #!/bin/bash
 set -eu
-unset MINIFY_SETUP_GUI
+exec </dev/null
 helper=$(cd -P "$(dirname "$0")" && pwd)/prepare-workshop
 root=$(mktemp -d "${TMPDIR:-/tmp}/minify-workshop-test.XXXXXXXX")
 trap '/bin/rm -rf -- "$root"' EXIT
@@ -17,25 +17,6 @@ reject() {
     if "$@" </dev/null; then echo >&2 "Expected rejection: $*"; exit 1; fi
 }
 
-# Finder has no terminal. Exercise its choices without displaying dialogs or running interpolated AppleScript.
-sed "s@/usr/bin/osascript @\"\$DIALOG\" @" "${helper%/*}/confirm" > "$root/confirm"
-chmod +x "$root/confirm"
-export DIALOG="$root/dialog" GUI_PROMPT='Download from path "a"; $?'
-cat > "$DIALOG" <<'DIALOG'
-#!/bin/sh
-[ "$#" -eq 2 ] && [ "$1" = - ] && [ "$2" = "$GUI_PROMPT" ] && grep -Fq 'item 1 of argv' || exit 3
-printf '%s\n' "$BUTTON"
-DIALOG
-chmod +x "$DIALOG"
-MINIFY_SETUP_GUI=1 BUTTON=Continue "$root/confirm" "$GUI_PROMPT" </dev/null
-rc=0; MINIFY_SETUP_GUI=1 BUTTON=Skip "$root/confirm" "$GUI_PROMPT" </dev/null || rc=$?
-[[ $rc == 2 ]]
-rc=0; MINIFY_SETUP_GUI=1 BUTTON=Continue "$root/confirm" 'wrong argument' </dev/null || rc=$?
-[[ $rc == 1 ]]
-rc=0; MINIFY_SETUP_GUI=0 BUTTON=Continue "$root/confirm" "$GUI_PROMPT" </dev/null || rc=$?
-[[ $rc == 1 ]]
-
-reject "$helper"
 reject env MINIFY_DOTA_WINDOWS="$root/missing" "$helper" --import
 [[ ! -e config ]]
 ln -s "$root" config
@@ -73,36 +54,23 @@ mv "$MINIFY_DOTA_WINDOWS/game/bin/win64/smartprops.dll" "$root/hold.dll"
 reject "$helper" --import
 [[ ! -e config/rescomproot ]]
 mv "$root/hold.dll" "$MINIFY_DOTA_WINDOWS/game/bin/win64/smartprops.dll"
-unset MINIFY_DOTA_WINDOWS
-"$helper" --import
+reject "$helper" --download
+"$helper"
 [[ $(<"$dst") == independent ]]
+unset MINIFY_DOTA_WINDOWS
 
-# The app prefers Steam over the adjacent portable installation. The latter needs consent.
+# Only explicit imports look for local tools; prefer Steam over a neighboring portable copy.
 bundled="$root/My App.app/Contents/Resources/macos/prepare-workshop"
 portable="$root/Minify/config/rescomproot"
 mkdir -p "${bundled%/*}" "${portable%/*}" "$root/upgrade"
 cp "$helper" "$bundled"
-cp "${helper%/*}/confirm" "${bundled%/*}/"
 cp -R "$root/imported" "$portable"
 cd "$root/upgrade"
 "$bundled" --import
 [[ $(<"$dst") == independent ]]
 mv config/rescomproot "$root/from-steam"
 unset MINIFY_STEAM_LIBRARY
-reject "$bundled" --import
-[[ ! -e config/rescomproot ]]
-export BUNDLED="$bundled"
-/usr/bin/expect <<'EXPECT'
-set timeout 10
-spawn -noecho $env(BUNDLED)
-expect {
-    -exact {[y/N] } { send "y\r" }
-    timeout { exit 2 }
-    eof { exit 3 }
-}
-expect eof
-exit [lindex [wait] 3]
-EXPECT
+"$bundled" --import
 [[ $(<"$dst") == fixture && ! -e config/rescomproot/.minify-js-probe ]]
 
 # A fake downloader substitutes test bytes only after checking the exact release URL and SHA.
@@ -147,12 +115,12 @@ for bad in missing parent-path link; do
     reject env FIXTURE_ZIP="$root/$bad.zip" "$helper" --download
     [[ ! -e config/rescomproot && -z "$(ls -A config)" ]]
 done
-for gui in 0 1; do
-    mkdir "$root/download/$gui"; cd "$root/download/$gui"
-    MINIFY_SETUP_GUI=$gui FIXTURE_ZIP="$root/ok.zip" "$helper" </dev/null
-    [[ $(<"$dst") == 'test mirror bytes' && $(xattr -p com.apple.quarantine "$dst") == '0083;0;Fixture;' ]]
-    MINIFY_SETUP_GUI=$gui FIXTURE_ZIP="$root/must-not-refetch.zip" "$helper" </dev/null
-done
+# Even when both local sources exist, an ordinary launch downloads only the pinned archive.
+cp "$root/fakes/fetch-verified" "${bundled%/*}/"
+export MINIFY_STEAM_LIBRARY="$root/external library"
+FIXTURE_ZIP="$root/ok.zip" "$bundled"
+[[ $(<"$dst") == 'test mirror bytes' && $(xattr -p com.apple.quarantine "$dst") == '0083;0;Fixture;' ]]
+FIXTURE_ZIP="$root/must-not-refetch.zip" "$bundled"
 
 mkdir "$root/concurrent"; cd "$root/concurrent"
 FIXTURE_ZIP="$root/ok.zip" "$helper" --download > "$root/first" 2>&1 & first=$!

@@ -4,7 +4,7 @@ import time
 from typing import Any, Dict, List
 
 import patch
-from core import output
+from core import base, output
 
 
 class PatchService:
@@ -17,6 +17,12 @@ class PatchService:
 
         output.register_listener(self._on_output_log)
         output.register_download_listener(self._on_download_progress)
+        if base.is_mac and base.FROZEN:
+            from core import macos_app
+
+            for text, msg_type in macos_app.startup_messages:
+                self._on_output_log(text, msg_type)
+            macos_app.startup_messages.clear()
 
     def close(self) -> None:
         output.unregister_listener(self._on_output_log)

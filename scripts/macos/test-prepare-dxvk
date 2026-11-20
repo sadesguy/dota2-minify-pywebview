@@ -1,6 +1,5 @@
 #!/bin/bash
 set -eu
-unset MINIFY_SETUP_GUI
 scripts=$(cd -P "$(dirname "$0")" && pwd)
 tmp=$(mktemp -d)
 tmp=$(cd -P "$tmp" && pwd)
@@ -51,7 +50,7 @@ ln -s "$tmp/foreign" "$bin/d3d11.dll"
 reject prepare_dxvk
 [[ -L "$bin/d3d11.dll" && $(<"$tmp/foreign") == foreign && ! -e $TRACE ]]
 unlink "$bin/d3d11.dll"
-MINIFY_SETUP_GUI=1 prepare_dxvk </dev/null
+prepare_dxvk </dev/null
 [[ $MINIFY_DXVK_COMPILER == "$bin/resourcecompiler.exe" ]]
 for name in d3d11.dll d3d10core.dll; do
     cmp "$bin/$name" "$tmp/$release/x64/$name"

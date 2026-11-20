@@ -70,7 +70,7 @@ resources="$contents/Resources"
 portable_zip="Minify-macos-$arch.zip"
 app_zip="Minify-app-macos-$arch.zip"
 ditto --norsrc "$src" "$portable"
-install -m 755 "scripts/macos/Start Minify.command" scripts/macos/{setup-workshop,confirm,prepare-workshop,check-workshop,fetch-verified} "$portable/"
+install -m 755 "scripts/macos/Start Minify.command" scripts/macos/{setup-workshop,prepare-workshop,check-workshop,fetch-verified} "$portable/"
 install -m 644 docs/macos.md scripts/macos/{prepare-wine,prepare-dxvk} "$portable/"
 mkdir -p "$portable/launcher-bin"
 install -m 755 scripts/macos/launcher-bin/wine "$portable/launcher-bin/wine"
@@ -87,7 +87,7 @@ for item in "$contents/Frameworks"/*; do
     ln -s "../Resources/$name" "$item"
 done
 for item in mods plugins themes README.md LICENSE; do ditto --norsrc "$src/$item" "$resources/defaults/$item"; done
-for item in setup-workshop confirm prepare-workshop check-workshop fetch-verified prepare-wine prepare-dxvk launcher-bin macos.md; do
+for item in setup-workshop prepare-workshop check-workshop fetch-verified prepare-wine prepare-dxvk launcher-bin macos.md; do
     ditto --norsrc "$portable/$item" "$resources/macos/$item"
 done
 
@@ -121,7 +121,7 @@ dota="$HOME/Library/Application Support/Steam/steamapps/common/dota 2 beta/game/
 mkdir -p "$dota"
 touch "$dota/dota2"
 portable="$tmp/extracted/Minify"
-for entry in 'Start Minify.command' setup-workshop confirm prepare-workshop check-workshop fetch-verified launcher-bin/wine Minify; do test -x "$portable/$entry"; done
+for entry in 'Start Minify.command' setup-workshop prepare-workshop check-workshop fetch-verified launcher-bin/wine Minify; do test -x "$portable/$entry"; done
 "$portable/Start Minify.command" --skip-setup --version | grep -Fx "$version"
 app="$tmp/extracted/Minify.app"
 lipo "$app/Contents/MacOS/Minify" -verify_arch "$arch"

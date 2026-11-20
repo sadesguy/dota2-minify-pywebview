@@ -19,7 +19,7 @@ install_standalone_wine() (
     [[ ! -e $release && ! -L $release && ! -L $cache ]] || {
         echo "Wine cache already exists or is a symlink: $release. Nothing replaced." >&2; return 1
     }
-    "$wine_helpers/confirm" 'Download Wine Stable (177 MB) from Gcenx on GitHub for this user?' || return $?
+    echo "Downloading Wine Stable 11.0_1 from Gcenx (177 MB)."
     mkdir -p "$cache" || return 1
     tmp=$(mktemp -d "$cache/.wine.XXXXXXXX") || return 1
     trap '/bin/rm -rf -- "$tmp"' EXIT
@@ -37,21 +37,34 @@ install_standalone_wine() (
     /bin/mv "$app" "$release/" || { rmdir "$release"; return 1; }
 )
 
+check_wine_policy() {
+    local app=$1 result
+    echo "Checking Wine with Gatekeeper: $app"
+    if [[ -x /usr/bin/gktool ]]; then
+        result=$(/usr/bin/gktool scan "$app" 2>&1) && return 0
+    else
+        result=$(/usr/sbin/spctl --assess --type execute -vv "$app" 2>&1) && return 0
+    fi
+    printf 'Gatekeeper did not clear Wine for execution: %s\n%s\n' "$app" "${result##*$'\r'}" >&2
+    echo "If you trust this copy, open it in Finder, then check System Settings > Privacy & Security for Open Anyway. Retry with Minify's hammer button. Do not override a malware warning." >&2
+    return 1
+}
+
 prepare_wine() {
     local release="$HOME/Library/Application Support/Dota2-Minify/wine-11.0_1"
-    local app="$release/Wine Stable.app" wine_bin record=''
-    if ! wine_bin=$(find_standalone_wine); then
-        [[ ! -L ${release%/*} && ! -L $release && ! -L $app ]] || { echo 'Refusing a symlinked Wine cache.' >&2; return 1; }
-        [[ -d $app ]] || install_standalone_wine "$release" || return $?
-        if [[ ! -f "$release/first-run-complete" ]]; then
-            if ! /usr/sbin/spctl --assess --type execute "$app"; then
-                echo "Opening Wine through macOS for its first launch: $app" >&2
-                /usr/bin/open -n "$app" || {
-                    echo 'Check Privacy & Security for the Wine approval, then retry. Do not disable Gatekeeper.' >&2; return 1
-                }
+    local app="$release/Wine Stable.app" wine_bin resolved
+    if wine_bin=$(find_standalone_wine); then
+        resolved=$(/bin/realpath "$wine_bin") || return 1
+        if [[ $resolved == *.app/Contents/* ]]; then
+            app=${resolved%/Contents/*}
+            if /usr/bin/xattr -p com.apple.quarantine "$app" >/dev/null 2>&1 || /usr/bin/xattr -p com.apple.quarantine "$resolved" >/dev/null 2>&1; then
+                check_wine_policy "$app" || return 1
             fi
-            record="$release/first-run-complete"
         fi
+    else
+        [[ ! -L ${release%/*} && ! -L $release && ! -L $app ]] || { echo 'Refusing a symlinked Wine cache.' >&2; return 1; }
+        [[ -d $app ]] || install_standalone_wine "$release" || return 1
+        check_wine_policy "$app" || return 1
         wine_bin="$app/Contents/Resources/wine/bin/wine"
         [[ -x $wine_bin ]] || return 1
     fi
@@ -62,9 +75,9 @@ prepare_wine() {
     unset CX_ROOT CX_HOME CX_BOTTLE WINEARCH WINELOADER WINESERVER WINEDLLPATH WINEMSYNC CX_APPLEGPTK_LIBD3DSHARED_PATH
     export MINIFY_WINE="$wine_bin" PATH="$wine_helpers/launcher-bin:${wine_bin%/*}:$PATH" WINEPREFIX="$PWD/config/wineprefix"
     echo "Checking Wine: $wine_bin"
-    if ! MVK_CONFIG_LOG_LEVEL=0 WINEDEBUG=-all WINEDLLOVERRIDES='winemenubuilder.exe=d' "$wine_bin" cmd /d /c ver; then
+    # The native compiler needs neither Wine Mono nor Gecko during prefix creation.
+    if ! MVK_CONFIG_LOG_LEVEL=0 WINEDEBUG=-all WINEDLLOVERRIDES='winemenubuilder.exe,mscoree,mshtml=' "$wine_bin" cmd /d /c ver; then
         echo 'Wine could not run Windows cmd. Check macOS approval, Rosetta on Apple Silicon, and the Wine runtime.' >&2
         return 1
     fi
-    [[ -z $record || -e $record ]] || (umask 077; set -C; : > "$record")
 }

@@ -119,7 +119,10 @@ def resolve_dependencies():
             else os.path.join(".", constants.rg_executable)
         )
 
-    except Exception:
+    except Exception as error:
+        if base.is_mac and "MINIFY_WORKSHOP_READY" in os.environ:
+            output.add_text(f"Could not prepare patch tools: {error}. Minify will retry on patch.", msg_type="error")
+            return
         log.write_crashlog()
         output.add_text("&failed_download", 3, msg_type="error")
         output.add_text("&connection_error", msg_type="error")

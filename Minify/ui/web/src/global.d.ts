@@ -101,6 +101,7 @@ declare global {
         check_workshop_tools_needed?: () => Promise<boolean>;
         extract_workshop_tools?: () => Promise<boolean>;
         is_workshop_installed?: () => Promise<boolean>;
+        uses_managed_macos_setup?: () => Promise<boolean>;
         should_offer_workshop_download?: (manual?: boolean) => Promise<boolean>;
         download_workshop_tools?: () => Promise<boolean>;
         get_legacy_mods?: () => Promise<string[]>;

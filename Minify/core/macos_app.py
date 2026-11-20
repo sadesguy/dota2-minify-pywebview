@@ -10,6 +10,8 @@ import subprocess
 import sys
 import tempfile
 
+startup_messages: list[tuple[str, str | None]] = []
+
 
 def _no_symlink(path):
     if path.is_symlink():
@@ -100,41 +102,44 @@ def is_packaged(work_dir, resources_dir):
     return bool(resources_dir) or (Path(work_dir) / "setup-workshop").is_file()
 
 
-def setup_workshop(work_dir, resources_dir, *, gui):
+def setup_workshop(work_dir, resources_dir, *, report=None):
     work = Path(work_dir)
     driver = (Path(resources_dir) / "macos" if resources_dir else work) / "setup-workshop"
     os.environ["MINIFY_WORKSHOP_READY"] = "0"
     os.environ.pop("MINIFY_DXVK_COMPILER", None)
-    env = os.environ.copy()
-    if gui:
-        env["MINIFY_SETUP_GUI"] = "1"
-    else:
-        env.pop("MINIFY_SETUP_GUI", None)
+    messages = []
     try:
-        proc = subprocess.run(
-            [driver], cwd=work, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE if gui else None
-        )
-        if proc.returncode == 2:  # User declined a download.
-            return False
-        proc.check_returncode()
-        wine, prefix, path, dxvk, end = map(os.fsdecode, proc.stdout.split(b"\0"))
+        # stdout is a binary environment record; only stderr contains user-facing messages.
+        with tempfile.TemporaryFile() as result:
+            with subprocess.Popen(
+                [driver], cwd=work, stdin=subprocess.DEVNULL, stdout=result, stderr=subprocess.PIPE if report else None
+            ) as proc:
+                if proc.stderr is not None:
+                    for line in proc.stderr:
+                        text = line.decode(errors="replace").strip()
+                        if text:
+                            messages.append(text)
+                            report(text)
+                status = proc.wait()
+            if status:
+                raise subprocess.CalledProcessError(status, driver)
+            result.seek(0)
+            wine, prefix, path, dxvk, end = map(os.fsdecode, result.read().split(b"\0"))
         if end or not wine or not prefix or not path:
             raise ValueError("Invalid environment from Workshop setup")
     except (subprocess.CalledProcessError, OSError, ValueError) as error:
-        if not gui:
+        if report is None:
             raise SystemExit(f"Workshop setup failed: {error}") from error
-        fd, log = tempfile.mkstemp(prefix="workshop-setup-", suffix=".log", dir=work)
-        with os.fdopen(fd, "wb") as file:
-            file.write(getattr(error, "stderr", None) or str(error).encode())
-        subprocess.run(
-            [
-                "/usr/bin/osascript",
-                "-e",
-                'on run argv\ndisplay alert "Workshop setup failed" message (item 1 of argv)\nend run',
-                f"Workshop Tools are disabled. Setup log: {log}",
-            ],
-            check=False,
-        )
+        detail = str(error)
+        try:
+            with tempfile.NamedTemporaryFile(
+                mode="w", encoding="utf-8", prefix="workshop-setup-", suffix=".log", dir=work, delete=False
+            ) as log:
+                log.write("\n".join([*messages, detail]) + "\n")
+            detail = f"Setup log: {log.name}"
+        except OSError:
+            pass  # A full disk can prevent both installation and saving its log.
+        report(f"Workshop setup failed. Regular mods remain available. {detail}", msg_type="error")
         return False
     for key in (
         "CX_ROOT",
@@ -151,6 +156,8 @@ def setup_workshop(work_dir, resources_dir, *, gui):
     os.environ.update(MINIFY_WINE=wine, WINEPREFIX=prefix, PATH=path, MINIFY_WORKSHOP_READY="1")
     if dxvk:
         os.environ["MINIFY_DXVK_COMPILER"] = dxvk
+    if report is not None:
+        report("Workshop Tools ready.")
     return True
 
 
@@ -169,5 +176,10 @@ def prepare(work_dir, resources_dir, argv):
         return
     if argv[1:2] in (["--version"], ["-v"], ["--help"], ["-h"], ["config"], ["mods"], ["uninstall"]):
         return
-    gui = argv[1:] in ([], ["--host"]) and not (sys.stdin and sys.stdin.isatty())
-    setup_workshop(work, resources, gui=gui)
+
+    def report_startup(text, msg_type=None):
+        startup_messages.append((text, msg_type))
+        if sys.stderr is not None:
+            print(text, file=sys.stderr, flush=True)
+
+    setup_workshop(work, resources, report=report_startup if argv[1:] in ([], ["--host"]) else None)

@@ -169,9 +169,13 @@
   async function initPyWebView() {
     const run = async () => {
       try {
-        await Promise.all([initTheme(), handleLoadApiData(), checkWorkshopToolsAvailability(), checkLegacyMods()]);
-      } finally {
-        dismissLoader();
+        await Promise.all([initTheme(), handleLoadApiData(), checkWorkshopToolsAvailability()]);
+        // Don't interrupt unattended macOS startup with an import, news, or a Windows installer.
+        if (await window.pywebview?.api?.uses_managed_macos_setup?.()) {
+          if (logs.some((entry) => entry.type === "error")) changeTab("terminal");
+          return;
+        }
+        await checkLegacyMods();
         getAppVersion().then(async (appVersion) => {
           let announcementsShown = false;
           try {
@@ -205,6 +209,8 @@
             await checkWorkshopDownload();
           }
         });
+      } finally {
+        dismissLoader();
       }
     };
 
@@ -548,6 +554,8 @@
         showWorkshopDownloadModal = true;
       } else if (await api?.download_workshop_tools?.()) {
         await handleWorkshopDownloadSuccess();
+      } else {
+        changeTab("terminal");
       }
     } finally {
       retryingWorkshopSetup = false;

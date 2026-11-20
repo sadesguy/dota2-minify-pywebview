@@ -10,7 +10,8 @@ import pytest
 if sys.platform != "darwin":
     pytest.skip("macOS bootstrap", allow_module_level=True)
 
-from core import macos_app
+from core import base, macos_app
+from ui.services import PatchService
 
 
 @pytest.fixture
@@ -86,27 +87,49 @@ def test_setup_environment_and_failure(packaged, monkeypatch):
     driver.write_text("#!/bin/sh\nprintf '%s\\0' '/Wine App/wine' '/test/prefix' '/bin' '/compiler'\n")
     driver.chmod(0o755)
     monkeypatch.setenv("CX_BOTTLE", "stale")
-    assert macos_app.setup_workshop(work, resources, gui=False)
+    assert macos_app.setup_workshop(work, resources)
     assert os.environ["MINIFY_WINE"] == "/Wine App/wine"
     assert os.environ["MINIFY_WORKSHOP_READY"] == "1" and "CX_BOTTLE" not in os.environ
     driver.write_text("#!/bin/sh\nexit 2\n")
-    assert not macos_app.setup_workshop(work, resources, gui=False)
+    with pytest.raises(SystemExit, match="Workshop setup failed"):
+        macos_app.setup_workshop(work, resources)
     assert os.environ["MINIFY_WORKSHOP_READY"] == "0" and "MINIFY_DXVK_COMPILER" not in os.environ
     driver.write_text("#!/bin/sh\necho failed >&2; exit 1\n")
     with pytest.raises(SystemExit, match="Workshop setup failed"):
-        macos_app.setup_workshop(work, resources, gui=False)
+        macos_app.setup_workshop(work, resources)
+    messages = []
+    assert not macos_app.setup_workshop(
+        work, resources, report=lambda text, msg_type=None: messages.append((text, msg_type))
+    )
+    log = next(work.glob("workshop-setup-*.log"))
+    assert "failed\n" in log.read_text()
+    assert messages[0] == ("failed", None)
+    assert str(log) in messages[-1][0] and messages[-1][1] == "error"
 
-    run = subprocess.run
 
-    def stub_alert(command, **kwargs):
-        if command[0] != "/usr/bin/osascript":
-            assert kwargs["env"]["MINIFY_SETUP_GUI"] == "1"
-            return run(command, **kwargs)
-        return subprocess.CompletedProcess(command, 0)
-
-    monkeypatch.setattr(subprocess, "run", stub_alert)
-    assert not macos_app.setup_workshop(work, resources, gui=True)
-    assert next(work.glob("workshop-setup-*.log")).read_bytes() == b"failed\n"
+@pytest.mark.parametrize("fails", [False, True])
+def test_gui_terminal_receives_startup_messages(packaged, monkeypatch, capsys, fails):
+    work, resources = packaged
+    driver = resources / "macos/setup-workshop"
+    action = "exit 1" if fails else "printf '%s\\0' /wine /prefix /bin ''"
+    driver.write_text(f"#!/bin/sh\necho 'Downloading Wine' >&2\n{action}\n")
+    driver.chmod(0o755)
+    monkeypatch.setattr(base, "FROZEN", True)
+    monkeypatch.setattr(macos_app, "startup_messages", [])
+    macos_app.prepare(work, resources, ["Minify"])
+    assert "Downloading Wine" in capsys.readouterr().err
+    service = PatchService()
+    try:
+        stage, result = service.get_logs()
+        assert stage["text"] == "Downloading Wine" and stage["type"] == "info"
+        if fails:
+            assert result["type"] == "error"
+            assert str(next(work.glob("workshop-setup-*.log"))) in result["text"]
+        else:
+            assert result["text"] == "Workshop Tools ready." and result["type"] == "info"
+        assert not macos_app.startup_messages
+    finally:
+        service.close()
 
 
 def test_portable_command_forwards_args(tmp_path):

@@ -1,6 +1,5 @@
 #!/bin/bash
 set -eu
-unset MINIFY_SETUP_GUI
 scripts=$(cd -P "$(dirname "$0")" && pwd)
 root=$(mktemp -d)
 root=$(cd -P "$root" && pwd)
@@ -9,7 +8,9 @@ export HOME="$root/home" PATH=/usr/bin:/bin
 bin="$HOME/Applications/Wine Stable.app/Contents/Resources/wine/bin"
 helpers="$root/My App Helpers"
 mkdir -p "$bin" "$root/My Minify/config" "$helpers/launcher-bin"
-cp "$scripts/prepare-wine" "$scripts/confirm" "$helpers/"
+# Model quarantine with a test attribute; never open a real security dialog for a fixture.
+sed -e 's|/usr/bin/gktool|"$wine_helpers/gktool"|g' -e 's|/usr/sbin/spctl|"$wine_helpers/spctl"|g' \
+    -e 's/com\.apple\.quarantine/org.minify.test-quarantine/g' "$scripts/prepare-wine" > "$helpers/prepare-wine"
 cp "$scripts/launcher-bin/wine" "$helpers/launcher-bin/"
 source "$helpers/prepare-wine"
 cd "$root/My Minify"
@@ -17,6 +18,7 @@ cat > "$bin/wine" <<'STUB'
 #!/bin/sh
 if [ "$1" = cmd ]; then
     [ "$*" = "cmd /d /c ver" ] && [ -z "${CX_BOTTLE:-}${WINELOADER:-}" ] && [ "$WINEPREFIX" = "$PWD/config/wineprefix" ] || exit 2
+    [ "$WINEDLLOVERRIDES" = 'winemenubuilder.exe,mscoree,mshtml=' ] || exit 2
 fi
 printf '%s\0' "$@" > ran
 exit "${STUB_WINE_STATUS:-0}"
@@ -41,19 +43,28 @@ ln -s "$root" config/wineprefix
 if prepare_wine; then exit 1; fi
 [[ ! -e ran ]]
 unlink config/wineprefix
-printf '#!/bin/sh\nexit 7\n' > "$bin/wine"
-if prepare_wine; then exit 1; fi
+if STUB_WINE_STATUS=7 prepare_wine; then exit 1; fi
+rm ran
+
+cat > "$helpers/gktool" <<'STUB'
+#!/bin/sh
+[ "$#" = 2 ] && [ "$1" = scan ] && [ -d "$2" ] || exit 2
+echo "$2" >> "$HOME/scans"
+exit "${TEST_POLICY:-0}"
+STUB
+chmod +x "$helpers/gktool"
+# Quarantined system/user installations are checked before Wine runs.
+xattr -w org.minify.test-quarantine '0083;0;Fixture;' "$HOME/Applications/Wine Stable.app"
+if TEST_POLICY=70 prepare_wine </dev/null 2>"$root/error"; then exit 1; fi
+[[ ! -e ran ]] && grep -Fq "$HOME/Applications/Wine Stable.app" "$root/error"
+prepare_wine </dev/null
+[[ -f ran ]]
+rm ran
 
 # Exercise the download path without touching a host installation, network, or trust settings.
 find_standalone_wine() { return 1; }
 cache="$HOME/Library/Application Support/Dota2-Minify"
 release="$cache/wine-11.0_1"
-if prepare_wine </dev/null; then exit 1; fi
-[[ ! -e $cache ]]
-printf '#!/bin/sh\nexit 2\n' > "$helpers/confirm"
-rc=0; prepare_wine || rc=$?
-[[ $rc == 2 && ! -e $cache ]]
-printf '#!/bin/sh\nexit 0\n' > "$helpers/confirm"
 printf '#!/bin/sh\nexit 3\n' > "$helpers/fetch-verified"
 chmod +x "$helpers/fetch-verified"
 if install_standalone_wine "$release"; then exit 1; fi
@@ -63,13 +74,32 @@ cat > "$helpers/fetch-verified" <<'STUB'
 #!/bin/sh
 test "$1" = 'https://github.com/Gcenx/macOS_Wine_builds/releases/download/11.0_1/wine-stable-11.0_1-osx64.tar.xz' &&
 test "$2" = 'b50dc50ec7f41d58b115a6b685d4d1315ba3c797bd3aa0f49213f2703cb82388' &&
-cp "$HOME/../fixture.tar.xz" "$3" && xattr -w com.apple.quarantine '0083;0;Fixture;' "$3"
+cp "$HOME/../fixture.tar.xz" "$3" && xattr -w org.minify.test-quarantine '0083;0;Fixture;' "$3"
 STUB
-install_standalone_wine "$release"
+if TEST_POLICY=70 prepare_wine </dev/null 2>"$root/error"; then exit 1; fi
 cached="$release/Wine Stable.app"
-[[ -x "$cached/Contents/Resources/wine/bin/wine" ]]
+[[ ! -e ran && -x "$cached/Contents/Resources/wine/bin/wine" ]]
+grep -Fq "$cached" "$root/error"; grep -Fq 'Privacy & Security' "$root/error"
 for item in "$cached" "$cached/Contents/Resources/wine/bin/wine"; do
-    [[ "$(xattr -p com.apple.quarantine "$item")" == '0083;0;Fixture;' ]]
+    [[ "$(xattr -p org.minify.test-quarantine "$item")" == '0083;0;Fixture;' ]]
 done
+# A stale marker cannot exempt the cached runtime from the next policy check.
+touch "$release/first-run-complete"
+if TEST_POLICY=70 prepare_wine </dev/null; then exit 1; fi
+[[ ! -e ran ]]
+rm "$helpers/fetch-verified"
+prepare_wine </dev/null
+[[ -f ran && $MINIFY_WINE == "$cached/Contents/Resources/wine/bin/wine" ]]
+rm ran "$helpers/gktool"
+cat > "$helpers/spctl" <<'STUB'
+#!/bin/sh
+[ "$#" = 5 ] && [ "$1 $2 $3 $4" = "--assess --type execute -vv" ] && [ -d "$5" ] || exit 2
+exit "${TEST_POLICY:-0}"
+STUB
+chmod +x "$helpers/spctl"
+if TEST_POLICY=3 prepare_wine </dev/null; then exit 1; fi
+[[ ! -e ran ]]
+prepare_wine </dev/null
+[[ -f ran ]]
 if install_standalone_wine "$release"; then exit 1; fi
 echo "Standalone Wine fixtures passed."

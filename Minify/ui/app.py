@@ -24,6 +24,14 @@ class Api:
         self.config_service = ConfigService()
         self.plugin_service = PluginService()
         self.dialog_service = DialogService()
+        if self.uses_managed_macos_setup():
+            self._prefetch_patch_tools()
+
+    def _prefetch_patch_tools(self) -> None:
+        import conditions
+
+        if not conditions.check_binaries():
+            conditions.resolve_dependencies()
 
     def set_window(self, window: Any) -> None:
         self.patch_service.set_window(window)
@@ -262,8 +270,11 @@ class Api:
 
         return bool(conditions.workshop_installed)
 
+    def uses_managed_macos_setup(self) -> bool:
+        return base.is_mac and "MINIFY_WORKSHOP_READY" in os.environ
+
     def should_offer_workshop_download(self, manual: bool = False) -> bool:
-        if base.is_mac and "MINIFY_WORKSHOP_READY" in os.environ:
+        if self.uses_managed_macos_setup():
             return False  # Packaged macOS runs setup directly, including toolbar retries.
         return manual or not self.get_state("ignore_workshop_download")
 
@@ -277,9 +288,12 @@ class Api:
             from core import macos_app
 
             if macos_app.is_packaged(base.base_dir, base.mac_app_resources):
-                ready = macos_app.setup_workshop(base.base_dir, base.mac_app_resources, gui=True)
+                ready = macos_app.setup_workshop(base.base_dir, base.mac_app_resources, report=output.add_text)
                 constants.recalc_rescomp_dirs()
-                return conditions.is_compiler_found() and ready
+                verified = conditions.is_compiler_found() and ready
+                if verified:
+                    self._prefetch_patch_tools()
+                return verified
 
         repo_url = (
             "https://github.com/Dota-Modding-Community/workshoptools/releases/latest/download/resourcecompiler.zip"
