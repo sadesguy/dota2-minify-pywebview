@@ -26,7 +26,10 @@ def recalc_rescomp_dirs():
         dota_resource_compiler_path, \
         rescomp_override
     rescomp_override = os.path.exists(base.rescomp_override_dir)
-    if rescomp_override and not os.path.exists(game_resource_compiler_path):
+    # The macOS launcher probes the workspace compiler, never the playable Steam copy.
+    if (base.is_mac and "MINIFY_WORKSHOP_READY" in os.environ) or (
+        rescomp_override and not os.path.exists(game_resource_compiler_path)
+    ):
         minify_dota_compile_input_path = os.path.join(base.rescomp_override_dir, "content", "dota_addons", "minify")
         minify_dota_compile_output_path = os.path.join(base.rescomp_override_dir, "game", "dota_addons", "minify")
         dota_resource_compiler_path = os.path.join(

@@ -1,0 +1,75 @@
+#!/bin/bash
+set -eu
+unset MINIFY_SETUP_GUI
+scripts=$(cd -P "$(dirname "$0")" && pwd)
+root=$(mktemp -d)
+root=$(cd -P "$root" && pwd)
+trap '/bin/rm -rf -- "$root"' EXIT
+export HOME="$root/home" PATH=/usr/bin:/bin
+bin="$HOME/Applications/Wine Stable.app/Contents/Resources/wine/bin"
+helpers="$root/My App Helpers"
+mkdir -p "$bin" "$root/My Minify/config" "$helpers/launcher-bin"
+cp "$scripts/prepare-wine" "$scripts/confirm" "$helpers/"
+cp "$scripts/launcher-bin/wine" "$helpers/launcher-bin/"
+source "$helpers/prepare-wine"
+cd "$root/My Minify"
+cat > "$bin/wine" <<'STUB'
+#!/bin/sh
+if [ "$1" = cmd ]; then
+    [ "$*" = "cmd /d /c ver" ] && [ -z "${CX_BOTTLE:-}${WINELOADER:-}" ] && [ "$WINEPREFIX" = "$PWD/config/wineprefix" ] || exit 2
+fi
+printf '%s\0' "$@" > ran
+exit "${STUB_WINE_STATUS:-0}"
+STUB
+chmod +x "$bin/wine"
+export CX_BOTTLE=unwanted WINELOADER=/wrong WINEPREFIX=/wrong
+prepare_wine
+[[ -f ran && "$(type -P wine)" == "$helpers/launcher-bin/wine" && $MINIFY_WINE == "$bin/wine" && $WINEPREFIX == "$PWD/config/wineprefix" ]]
+compiler="$PWD/config/rescomproot/game/bin/win64/resourcecompiler.exe"
+mkdir -p "${compiler%/*}"
+touch "$compiler"
+args=("$compiler" -i 'content/a b/*' -r)
+wine "${args[@]}"
+printf '%s\0' "${args[@]}" -vulkan | cmp - ran
+args=(winepath.exe -w "$compiler")
+rc=0
+STUB_WINE_STATUS=17 wine "${args[@]}" || rc=$?
+[[ $rc == 17 ]]
+printf '%s\0' "${args[@]}" | cmp - ran
+rm ran
+ln -s "$root" config/wineprefix
+if prepare_wine; then exit 1; fi
+[[ ! -e ran ]]
+unlink config/wineprefix
+printf '#!/bin/sh\nexit 7\n' > "$bin/wine"
+if prepare_wine; then exit 1; fi
+
+# Exercise the download path without touching a host installation, network, or trust settings.
+find_standalone_wine() { return 1; }
+cache="$HOME/Library/Application Support/Dota2-Minify"
+release="$cache/wine-11.0_1"
+if prepare_wine </dev/null; then exit 1; fi
+[[ ! -e $cache ]]
+printf '#!/bin/sh\nexit 2\n' > "$helpers/confirm"
+rc=0; prepare_wine || rc=$?
+[[ $rc == 2 && ! -e $cache ]]
+printf '#!/bin/sh\nexit 0\n' > "$helpers/confirm"
+printf '#!/bin/sh\nexit 3\n' > "$helpers/fetch-verified"
+chmod +x "$helpers/fetch-verified"
+if install_standalone_wine "$release"; then exit 1; fi
+[[ ! -e $release && -z "$(ls -A "$cache")" ]]
+tar -cJf "$root/fixture.tar.xz" -C "$HOME/Applications" 'Wine Stable.app'
+cat > "$helpers/fetch-verified" <<'STUB'
+#!/bin/sh
+test "$1" = 'https://github.com/Gcenx/macOS_Wine_builds/releases/download/11.0_1/wine-stable-11.0_1-osx64.tar.xz' &&
+test "$2" = 'b50dc50ec7f41d58b115a6b685d4d1315ba3c797bd3aa0f49213f2703cb82388' &&
+cp "$HOME/../fixture.tar.xz" "$3" && xattr -w com.apple.quarantine '0083;0;Fixture;' "$3"
+STUB
+install_standalone_wine "$release"
+cached="$release/Wine Stable.app"
+[[ -x "$cached/Contents/Resources/wine/bin/wine" ]]
+for item in "$cached" "$cached/Contents/Resources/wine/bin/wine"; do
+    [[ "$(xattr -p com.apple.quarantine "$item")" == '0083;0;Fixture;' ]]
+done
+if install_standalone_wine "$release"; then exit 1; fi
+echo "Standalone Wine fixtures passed."

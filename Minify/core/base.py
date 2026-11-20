@@ -55,9 +55,13 @@ DOTA_EXECUTABLE_PATH_FALLBACK = os.path.join("steamapps", "common", "dota 2 beta
 STEAM_DOTA_ID = "570"
 
 # static directory names
+mac_app_resources = None
 if FROZEN:
     base_dir = os.path.dirname(os.path.abspath(sys.executable))
     bundle_dir = getattr(sys, "_MEIPASS", base_dir)
+    if is_mac and base_dir.endswith(".app/Contents/MacOS"):
+        mac_app_resources = os.path.join(os.path.dirname(base_dir), "Resources")
+        base_dir = os.path.expanduser("~/Library/Application Support/Dota2-Minify/Workspace")
     web_dir = os.path.abspath(os.path.join(bundle_dir, "ui"))
 else:
     base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))

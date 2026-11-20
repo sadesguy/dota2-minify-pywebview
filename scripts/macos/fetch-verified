@@ -1,0 +1,17 @@
+#!/bin/bash
+# Callers supply a pinned SHA and a fresh path in their private staging directory.
+set -eu
+umask 077
+[[ $# == 3 && $1 == https://* && ${#2} == 64 && $2 != *[^0-9a-f]* ]] || exit 2
+url=$1 digest=$2 out=$3
+[[ ! -e $out && ! -L $out ]] || { echo >&2 "Download destination exists: $out"; exit 1; }
+tmp=$(mktemp "${out}.XXXXXXXX")
+trap '/bin/rm -f -- "$tmp"' EXIT
+/usr/bin/curl --proto '=https' --proto-redir '=https' --fail --location --show-error --silent \
+    --retry 2 --connect-timeout 20 --output "$tmp" "$url"
+actual=$(/usr/bin/openssl dgst -sha256 < "$tmp")
+[[ ${actual##* } == "$digest" ]] || { echo >&2 "SHA-256 mismatch. Download rejected: $url"; exit 1; }
+# curl is not a browser. Mark the archive as downloaded before handing it to the installer.
+/usr/bin/xattr -w com.apple.quarantine "0083;$(printf '%x' "$(/bin/date +%s)");Minify;" "$tmp"
+# Publish the verified bytes without replacing any existing destination.
+/bin/ln "$tmp" "$out"

@@ -1,0 +1,56 @@
+# Sourced by the macOS setup driver under /bin/bash.
+dxvk_helpers=$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+
+dxvk_matches() {
+    local sum expected
+    case ${1##*/} in
+        d3d11.dll) expected=0ff0b0835dde29556bd01dfce7b1ae348d7f229cb1e1a37cc71ea1a028beeca4 ;;
+        d3d10core.dll) expected=0fa08bba860c63e3abeeabfc96d0e7aa327411a975f8f23d2dc63594ef5f796e ;;
+        *) return 1 ;;
+    esac
+    [[ -f $1 && ! -L $1 ]] || return 1
+    sum=$(/usr/bin/openssl dgst -sha256 < "$1") && [[ ${sum##* } == "$expected" ]]
+}
+
+install_compiler_dxvk() (
+    umask 077
+    local bin=$1 tmp name quarantine release=dxvk-macOS-async-v1.10.3-20230507-repack
+    tmp=$(mktemp -d "$PWD/config/.dxvk.XXXXXXXX") || return 1
+    trap '/bin/rm -rf -- "$tmp"' EXIT
+    trap 'exit 1' HUP INT TERM
+    "$dxvk_helpers/fetch-verified" "https://github.com/Gcenx/DXVK-macOS/releases/download/v1.10.3-20230507-repack/$release.tar.gz" \
+        acd1520ad105d8ef124a09c8e11a259a5dc8bdc565ad18e0e52693f9807b2477 "$tmp/dxvk.tar.gz" || return 1
+    quarantine=$(/usr/bin/xattr -p com.apple.quarantine "$tmp/dxvk.tar.gz") && [[ -n $quarantine ]] || return 1
+    for name in d3d11.dll d3d10core.dll; do
+        /usr/bin/tar -xOf "$tmp/dxvk.tar.gz" "$release/x64/$name" > "$tmp/$name" || return 1
+        dxvk_matches "$tmp/$name" || { echo "Wrong DXVK file checksum: $name" >&2; return 1; }
+        /usr/bin/xattr -w com.apple.quarantine "$quarantine" "$tmp/$name" || return 1
+    done
+    for name in d3d11.dll d3d10core.dll; do
+        dxvk_matches "$bin/$name" || /bin/ln "$tmp/$name" "$bin/" || return 1
+    done
+)
+
+prepare_dxvk() {
+    unset MINIFY_DXVK_COMPILER
+    local bin="$PWD/config/rescomproot/game/bin/win64" name missing=0 unexpected
+    [[ ! -e "$bin/rendersystemvulkan.dll" && -f "$bin/rendersystemdx11.dll" ]] || return 0
+    [[ $(/bin/realpath "$bin") == "$(pwd -P)/config/rescomproot/game/bin/win64" && -f "$bin/resourcecompiler.exe" && ! -L "$bin/resourcecompiler.exe" ]] || {
+        echo "Refusing DXVK outside the private Workshop compiler directory." >&2; return 1
+    }
+    # Wine resolves DLL names case-insensitively, including on case-sensitive volumes.
+    unexpected=$(/usr/bin/find "$bin" -maxdepth 1 \( -iname d3d11.dll -o -iname d3d10core.dll \) ! -name d3d11.dll ! -name d3d10core.dll -print -quit) || return 1
+    [[ -z $unexpected ]] || { echo "Unexpected $unexpected; nothing replaced." >&2; return 1; }
+    for name in d3d11.dll d3d10core.dll; do
+        if [[ -e "$bin/$name" || -L "$bin/$name" ]]; then
+            dxvk_matches "$bin/$name" || { echo "Unexpected $bin/$name; nothing replaced." >&2; return 1; }
+        else
+            missing=1
+        fi
+    done
+    if (( missing )); then
+        echo "Downloading DXVK-macOS for the Workshop compiler (2.8 MB)."
+        install_compiler_dxvk "$bin" || return 1
+    fi
+    export MINIFY_DXVK_COMPILER="$bin/resourcecompiler.exe"
+}

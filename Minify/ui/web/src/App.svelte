@@ -35,6 +35,7 @@
   let showUpdateModal = false;
   let showWorkshopModal = false;
   let showWorkshopDownloadModal = false;
+  let retryingWorkshopSetup = false;
   let workshopModalData = null;
   let isWorkshopInstalled: boolean | null = null;
   let legacyMods: any[] = [];
@@ -515,8 +516,7 @@
     const isInstalled = isWorkshopInstalled ?? (await checkWorkshopToolsAvailability());
     if (isInstalled === false) {
       try {
-        const ignored = await window.pywebview?.api?.get_state?.("ignore_workshop_download");
-        if (!ignored) {
+        if (await window.pywebview?.api?.should_offer_workshop_download?.()) {
           showWorkshopDownloadModal = true;
         }
       } catch (err) {
@@ -539,8 +539,18 @@
   }
 
   async function handleWorkshopToolsClick() {
-    if ((await checkWorkshopToolsAvailability()) === false) {
-      showWorkshopDownloadModal = true;
+    if (retryingWorkshopSetup) return;
+    retryingWorkshopSetup = true;
+    try {
+      if ((await checkWorkshopToolsAvailability()) !== false) return;
+      const api = window.pywebview?.api;
+      if (await api?.should_offer_workshop_download?.(true)) {
+        showWorkshopDownloadModal = true;
+      } else if (await api?.download_workshop_tools?.()) {
+        await handleWorkshopDownloadSuccess();
+      }
+    } finally {
+      retryingWorkshopSetup = false;
     }
   }
 
@@ -569,7 +579,7 @@
     {activeTab}
     {isPatching}
     {pluginTabs}
-    showWorkshopToolsButton={isWorkshopInstalled === false}
+    showWorkshopToolsButton={isWorkshopInstalled === false && !retryingWorkshopSetup}
     onWorkshopToolsClick={handleWorkshopToolsClick}
     onTabChange={changeTab}
     onPatch={handlePatch}

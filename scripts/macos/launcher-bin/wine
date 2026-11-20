@@ -1,0 +1,10 @@
+#!/bin/sh
+# Core passes a relative compiler path; the acceptance probe passes the absolute path.
+case ${1##*/} in resourcecompiler.exe)
+    if [ -n "${MINIFY_DXVK_COMPILER:-}" ] && [ "$1" -ef "$MINIFY_DXVK_COMPILER" ]; then
+        export WINEDLLOVERRIDES='d3d11,d3d10core=n' DXVK_ASYNC=0
+    elif [ -n "${WINEPREFIX:-}" ] && [ "$1" -ef "${WINEPREFIX%/*}/rescomproot/game/bin/win64/resourcecompiler.exe" ]; then
+        set -- "$@" -vulkan
+    fi
+esac
+exec "${MINIFY_WINE:?Start Minify with its macOS launcher}" "$@"

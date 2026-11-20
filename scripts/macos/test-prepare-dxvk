@@ -1,0 +1,81 @@
+#!/bin/bash
+set -eu
+unset MINIFY_SETUP_GUI
+scripts=$(cd -P "$(dirname "$0")" && pwd)
+tmp=$(mktemp -d)
+tmp=$(cd -P "$tmp" && pwd)
+trap '/bin/rm -rf -- "$tmp"' EXIT
+cd "$tmp"
+work="$tmp/My Workspace"
+helpers="$tmp/App Helpers"
+bin="$work/config/rescomproot/game/bin/win64"
+release=dxvk-macOS-async-v1.10.3-20230507-repack
+mkdir -p "$bin" "$helpers" "$release/x64" "$tmp/other"
+for name in d3d11.dll d3d10core.dll; do echo "test $name" > "$release/x64/$name"; done
+h1=$(/usr/bin/openssl dgst -sha256 < "$release/x64/d3d11.dll")
+h2=$(/usr/bin/openssl dgst -sha256 < "$release/x64/d3d10core.dll")
+sed -e "s/0ff0b0835dde29556bd01dfce7b1ae348d7f229cb1e1a37cc71ea1a028beeca4/${h1##* }/" \
+    -e "s/0fa08bba860c63e3abeeabfc96d0e7aa327411a975f8f23d2dc63594ef5f796e/${h2##* }/" \
+    "$scripts/prepare-dxvk" > "$helpers/prepare-dxvk"
+export FIXTURE="$tmp/dxvk.tar.gz" TRACE="$tmp/trace"
+tar -czf "$FIXTURE" "$release"
+cat > "$helpers/fetch-verified" <<'MOCK'
+#!/bin/bash
+set -eu
+[[ $1 == https://github.com/Gcenx/DXVK-macOS/releases/download/v1.10.3-20230507-repack/dxvk-macOS-async-v1.10.3-20230507-repack.tar.gz && $2 == acd1520ad105d8ef124a09c8e11a259a5dc8bdc565ad18e0e52693f9807b2477 ]]
+cp "$FIXTURE" "$3"
+xattr -w com.apple.quarantine '0083;0;Fixture;' "$3"
+echo fetch >> "$TRACE"
+MOCK
+chmod +x "$helpers/fetch-verified"
+cd "$work"
+source "$helpers/prepare-dxvk"
+touch "$bin/resourcecompiler.exe"
+export MINIFY_DXVK_COMPILER=/wrong
+prepare_dxvk
+[[ -z ${MINIFY_DXVK_COMPILER:-} && ! -e $TRACE ]]
+touch "$bin"/{rendersystemvulkan.dll,rendersystemdx11.dll}
+prepare_dxvk
+[[ -z ${MINIFY_DXVK_COMPILER:-} && ! -e $TRACE ]]
+unlink "$bin/rendersystemvulkan.dll"
+reject() { if "$@" </dev/null; then echo >&2 "Unexpected success: $*"; exit 1; fi; }
+echo foreign > "$bin/d3d11.dll"
+reject prepare_dxvk
+[[ $(<"$bin/d3d11.dll") == foreign && ! -e $TRACE ]]
+mv "$bin/d3d11.dll" "$tmp/foreign"
+cp "$tmp/foreign" "$bin/D3D11.DLL"
+reject prepare_dxvk
+[[ $(<"$bin/D3D11.DLL") == foreign && ! -e $TRACE ]]
+unlink "$bin/D3D11.DLL"
+ln -s "$tmp/foreign" "$bin/d3d11.dll"
+reject prepare_dxvk
+[[ -L "$bin/d3d11.dll" && $(<"$tmp/foreign") == foreign && ! -e $TRACE ]]
+unlink "$bin/d3d11.dll"
+MINIFY_SETUP_GUI=1 prepare_dxvk </dev/null
+[[ $MINIFY_DXVK_COMPILER == "$bin/resourcecompiler.exe" ]]
+for name in d3d11.dll d3d10core.dll; do
+    cmp "$bin/$name" "$tmp/$release/x64/$name"
+    [[ $(xattr -p com.apple.quarantine "$bin/$name") == '0083;0;Fixture;' ]]
+done
+prepare_dxvk </dev/null
+[[ $(<"$TRACE") == fetch ]]
+
+# Minify passes a relative compiler path; an unrelated executable must not inherit DXVK overrides.
+export MINIFY_WINE="$tmp/wine-stub" WINEDLLOVERRIDES=previous
+cat > "$MINIFY_WINE" <<'MOCK'
+#!/bin/sh
+printf '%s\n' "$WINEDLLOVERRIDES" "$@" > invocation
+MOCK
+chmod +x "$MINIFY_WINE"
+relative=config/rescomproot/game/bin/win64/resourcecompiler.exe
+"$scripts/launcher-bin/wine" "$relative" -i 'files with spaces/*' -r
+[[ $(<invocation) == "d3d11,d3d10core=n"$'\n'"$relative"$'\n-i\nfiles with spaces/*\n-r' ]]
+touch "$tmp/other/resourcecompiler.exe"
+"$scripts/launcher-bin/wine" "$tmp/other/resourcecompiler.exe" -r
+[[ $(<invocation) == previous$'\n'"$tmp/other/resourcecompiler.exe"$'\n-r' ]]
+"$scripts/launcher-bin/wine" cmd /c ver
+[[ $(<invocation) == $'previous\ncmd\n/c\nver' ]]
+echo wrong >> "$bin/d3d10core.dll"
+reject prepare_dxvk
+[[ -z ${MINIFY_DXVK_COMPILER:-} && $(<"$TRACE") == fetch ]]
+echo "Compiler-only DXVK fixtures passed."

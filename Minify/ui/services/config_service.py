@@ -208,6 +208,8 @@ class ConfigService:
         for item in native_schema:
             parsed = self.parse_setting_item(item)
             if parsed:
+                if base.is_mac and parsed["key"] in ("fix_options", "patch_on_launch"):
+                    continue
                 if parsed["key"] == "steam_id":
                     accounts = steam.get_steam_accounts()
                     parsed["items"] = [

@@ -1,0 +1,70 @@
+# Sourced by the macOS setup driver under /bin/bash.
+wine_helpers=$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+find_standalone_wine() {
+    local candidate resolved
+    for candidate in "$HOME/Applications/Wine Stable.app/Contents/Resources/wine/bin/wine" \
+        "/Applications/Wine Stable.app/Contents/Resources/wine/bin/wine" "$(type -P wine)"; do
+        [[ -f $candidate && -x $candidate ]] || continue
+        resolved=$(/bin/realpath "$candidate") || continue
+        case "$resolved" in *[Cc]ross[Oo]ver*|*[Nn]ot[Pp]roton*) continue ;; esac
+        printf '%s\n' "$candidate"
+        return 0
+    done
+    return 1
+}
+
+install_standalone_wine() (
+    umask 077
+    local release=$1 cache=${1%/*} tmp app quarantine
+    [[ ! -e $release && ! -L $release && ! -L $cache ]] || {
+        echo "Wine cache already exists or is a symlink: $release. Nothing replaced." >&2; return 1
+    }
+    "$wine_helpers/confirm" 'Download Wine Stable (177 MB) from Gcenx on GitHub for this user?' || return $?
+    mkdir -p "$cache" || return 1
+    tmp=$(mktemp -d "$cache/.wine.XXXXXXXX") || return 1
+    trap '/bin/rm -rf -- "$tmp"' EXIT
+    trap 'exit 1' HUP INT TERM
+    "$wine_helpers/fetch-verified" 'https://github.com/Gcenx/macOS_Wine_builds/releases/download/11.0_1/wine-stable-11.0_1-osx64.tar.xz' \
+        b50dc50ec7f41d58b115a6b685d4d1315ba3c797bd3aa0f49213f2703cb82388 "$tmp/wine.tar.xz" || return 1
+    /usr/bin/tar -xf "$tmp/wine.tar.xz" -C "$tmp" || return 1
+    app="$tmp/Wine Stable.app"
+    [[ -d $app && ! -L $app && -x "$app/Contents/Resources/wine/bin/wine" ]] || {
+        echo "Wine archive does not contain the expected app." >&2; return 1
+    }
+    quarantine=$(/usr/bin/xattr -p com.apple.quarantine "$tmp/wine.tar.xz") && [[ -n $quarantine ]] || return 1
+    /usr/bin/find "$app" \( -type f -o -type d \) -exec /usr/bin/xattr -w com.apple.quarantine "$quarantine" {} + || return 1
+    mkdir "$release" || return 1
+    /bin/mv "$app" "$release/" || { rmdir "$release"; return 1; }
+)
+
+prepare_wine() {
+    local release="$HOME/Library/Application Support/Dota2-Minify/wine-11.0_1"
+    local app="$release/Wine Stable.app" wine_bin record=''
+    if ! wine_bin=$(find_standalone_wine); then
+        [[ ! -L ${release%/*} && ! -L $release && ! -L $app ]] || { echo 'Refusing a symlinked Wine cache.' >&2; return 1; }
+        [[ -d $app ]] || install_standalone_wine "$release" || return $?
+        if [[ ! -f "$release/first-run-complete" ]]; then
+            if ! /usr/sbin/spctl --assess --type execute "$app"; then
+                echo "Opening Wine through macOS for its first launch: $app" >&2
+                /usr/bin/open -n "$app" || {
+                    echo 'Check Privacy & Security for the Wine approval, then retry. Do not disable Gatekeeper.' >&2; return 1
+                }
+            fi
+            record="$release/first-run-complete"
+        fi
+        wine_bin="$app/Contents/Resources/wine/bin/wine"
+        [[ -x $wine_bin ]] || return 1
+    fi
+    [[ -x "$wine_helpers/launcher-bin/wine" && ! "$wine_bin" -ef "$wine_helpers/launcher-bin/wine" ]] || {
+        echo "Missing Wine launcher or Wine points to the launcher itself." >&2; return 1
+    }
+    [[ ! -L config && ! -L config/wineprefix ]] || { echo "Refusing a symlinked Wine prefix." >&2; return 1; }
+    unset CX_ROOT CX_HOME CX_BOTTLE WINEARCH WINELOADER WINESERVER WINEDLLPATH WINEMSYNC CX_APPLEGPTK_LIBD3DSHARED_PATH
+    export MINIFY_WINE="$wine_bin" PATH="$wine_helpers/launcher-bin:${wine_bin%/*}:$PATH" WINEPREFIX="$PWD/config/wineprefix"
+    echo "Checking Wine: $wine_bin"
+    if ! MVK_CONFIG_LOG_LEVEL=0 WINEDEBUG=-all WINEDLLOVERRIDES='winemenubuilder.exe=d' "$wine_bin" cmd /d /c ver; then
+        echo 'Wine could not run Windows cmd. Check macOS approval, Rosetta on Apple Silicon, and the Wine runtime.' >&2
+        return 1
+    fi
+    [[ -z $record || -e $record ]] || (umask 077; set -C; : > "$record")
+}

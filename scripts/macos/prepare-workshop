@@ -1,0 +1,95 @@
+#!/bin/bash
+# Run from Minify's writable workspace.
+set -euo pipefail
+umask 077
+die() { printf '%s\n' "$*" >&2; exit 1; }
+mode=${1:-}
+[[ $# == 0 || ( $# == 1 && ( $mode == --import || $mode == --download ) ) ]] || die "Usage: ${0##*/} [--import|--download]"
+helpers=$(cd -P "$(dirname "$0")" && pwd)
+parts=(game/bin game/core game/dota/bin game/dota/tools game/dota/gameinfo.gi)
+complete() {
+    local item
+    for item in game/bin/win64 game/core game/dota/bin/win64 game/dota/tools; do [[ -d "$1/$item" ]] || return 1; done
+    for item in game/bin/win64/{resourcecompiler.exe,resourcecompiler.dll,tier0.dll,smartprops.dll} game/dota/gameinfo.gi; do
+        [[ -f "$1/$item" && -s "$1/$item" ]] || return 1
+    done
+    [[ -f "$1/game/core/pak01_dir.vpk" && -s "$1/game/core/pak01_dir.vpk" ]] && return 0
+    # The community package uses loose game definitions and a custom Panorama config.
+    for item in game/core/gameinfo.gi game/core/panorama/panorama_config.txt game/dota/bin/win64/modtools.dll game/bin/win64/rendersystemdx11.dll; do
+        [[ -f "$1/$item" && -s "$1/$item" ]] || return 1
+    done
+}
+
+[[ ! -L config ]] || die "Refusing to follow symlink: $PWD/config"
+target=config/rescomproot
+if [[ -e $target || -L $target ]]; then
+    [[ ! -L $target ]] && complete "$target" || die "Existing $PWD/$target is incomplete or a symlink. Nothing replaced; move it aside yourself before retrying."
+    echo "Workshop Tools already present: $PWD/$target"
+    exit 0
+fi
+src=''
+if [[ -n ${MINIFY_DOTA_WINDOWS:-} ]]; then
+    src=$(/bin/realpath -q "$MINIFY_DOTA_WINDOWS") || die "Missing MINIFY_DOTA_WINDOWS: $MINIFY_DOTA_WINDOWS"
+    complete "$src" || die "Incomplete MINIFY_DOTA_WINDOWS: $src. Select a complete Windows Workshop Tools installation or unset it to download."
+fi
+portable_source=0
+if [[ -z $src && $mode != --download ]]; then
+    candidate="${MINIFY_STEAM_LIBRARY:-$HOME/Library/Application Support/Steam}/steamapps/common/dota 2 beta"
+    if complete "$candidate"; then
+        src=$(/bin/realpath "$candidate")
+    elif [[ $helpers == *.app/Contents/Resources/macos ]]; then
+        bundle=${helpers%/Contents/Resources/macos}
+        candidate="${bundle%/*}/Minify/config/rescomproot"
+        if complete "$candidate" && [[ $(/bin/realpath "$candidate") == "$candidate" ]]; then
+            src=$candidate
+            portable_source=1
+        fi
+    fi
+fi
+if [[ -n $src ]]; then
+    echo "Workshop Tools source: $src"
+    cd -P .
+    [[ $PWD != "$src" && $PWD != "$src"/* ]] || die "Run this from Minify's directory, not the source game."
+    [[ $mode != --download ]] || die "For a community archive download, unset MINIFY_DOTA_WINDOWS."
+    if [[ -z $mode || $portable_source == 1 ]]; then
+        "$helpers/confirm" "Copy compiler and game support files (can be several GB) into $PWD/$target?"
+    fi
+else
+    [[ $mode != --import ]] || die "No complete Windows tools found. Set MINIFY_DOTA_WINDOWS or run without --import to download."
+    echo "Downloading Workshop Tools from Dota-Modding-Community/workshoptools v1.0.1 (72 MB)."
+fi
+
+mkdir -p config
+cd -P config
+tmp=$(mktemp -d "$PWD/.workshop.XXXXXXXX")
+trap '/bin/rm -rf -- "$tmp"' EXIT
+trap 'exit 1' HUP INT TERM
+ready="$tmp/ready"
+mkdir -p "$ready/game/dota"
+if [[ -n $src ]]; then
+    for part in "${parts[@]}"; do /bin/cp -cRP "$src/$part" "$ready/$part"; done
+else
+    archive="$tmp/resourcecompiler.zip"
+    "$helpers/fetch-verified" 'https://github.com/Dota-Modding-Community/workshoptools/releases/download/v1.0.1/resourcecompiler.zip' \
+        9b22dff52ce4da9553a1112cfec79dfc87739cda08865b4417bcddaf973b2107 "$archive"
+    # Only ordinary files/directories under the release root. Reject links before extraction.
+    LC_ALL=C /usr/bin/tar -tf "$archive" | LC_ALL=C /usr/bin/awk '
+        !/^resourcecompiler(\/|$)/ || /[^a-zA-Z0-9_.() +\/-]/ || /(^|\/)\.\.?($|\/)|\/\// {bad=1}
+        END {exit (bad || !NR)}' || die "Unexpected path in Workshop Tools archive."
+    LC_ALL=C /usr/bin/tar -tvf "$archive" | LC_ALL=C /usr/bin/awk '
+        !/^[-d]/ {bad=1} END {exit (bad || !NR)}' || die "Archive contains a link or special file."
+    /usr/bin/tar -xf "$archive" -C "$tmp" --no-same-owner --no-same-permissions --no-mac-metadata --no-xattrs
+    ready="$tmp/resourcecompiler"
+    complete "$ready" || die "Incomplete community Workshop Tools archive. Nothing installed."
+    quarantine=$(/usr/bin/xattr -p com.apple.quarantine "$archive")
+    [[ -n $quarantine ]] || die "Archive missing download quarantine."
+    /usr/bin/find "$ready" -exec /usr/bin/xattr -w com.apple.quarantine "$quarantine" {} +
+fi
+complete "$ready" || die "Incomplete compiler files. Nothing installed."
+links=$(/usr/bin/find "$ready" -type l -print -quit)
+[[ -z $links ]] || die "Source contains symbolic links. Nothing installed."
+
+# Reserve without replacing a concurrently created installation. The tools all live in game/.
+mkdir rescomproot
+/bin/mv "$ready/game" rescomproot/ || { rmdir rescomproot; exit 1; }
+echo "Installed Workshop Tools: $PWD/rescomproot"

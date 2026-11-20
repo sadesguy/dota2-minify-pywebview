@@ -12,9 +12,11 @@ class Migrations:
         self._migrate_removed_post_patch_settings()
         self._rename_file_in_mods("modcfg.json", "manifest.json")
         self._rename_file_in_mods("xml_mod.json", "xml.json")
-        self._migrate_rescomproot_and_bin()
-        self._migrate_stale_rescomproot()
-        self._migrate_legacy_paks()
+        # The macOS launcher owns its tools; opening the app must not remove installed VPKs either.
+        if not (base.is_mac and "MINIFY_WORKSHOP_READY" in os.environ):
+            self._migrate_rescomproot_and_bin()
+            self._migrate_stale_rescomproot()
+            self._migrate_legacy_paks()
         self._migrate_flatten_d2pfx_manifests()
         self._migrate_outdated_s2v()
 

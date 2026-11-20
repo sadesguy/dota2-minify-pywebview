@@ -36,20 +36,21 @@ class ModService:
         if not conditions.workshop_installed:
             conditions.disable_workshop_mods()
 
+        blocked = conditions.unavailable_session_mods()
         mod_list = mods_shared.visually_available_mods
         mods_data = []
         for mod in mod_list:
             mod_path = os.path.join(base.mods_dir, mod)
             always = False
-            untickable = False
+            untickable = mod in blocked
             display_name = mod
             if os.path.isdir(mod_path):
                 cfg = manifest_utils.get_mod(mod_path)
                 always = bool(cfg.get("always", False))
                 if isinstance(cfg, dict) and cfg.get("name"):
                     display_name = str(cfg["name"])
-                if not conditions.workshop_installed and conditions.is_workshop_required_mod(mod_path, cfg):
-                    untickable = True
+                if not conditions.workshop_installed:
+                    untickable = untickable or conditions.is_workshop_required_mod(mod_path, cfg)
             preview = self.get_mod_preview(mod_path)
             mods_data.append(
                 {
@@ -402,7 +403,10 @@ class ModService:
         import conditions
         from patch import manifest_utils
 
+        blocked = conditions.unavailable_session_mods()
         for mod_name, enabled in data.items():
+            if mod_name in blocked:
+                continue
             mod_path = os.path.join(base.mods_dir, mod_name)
             if os.path.isdir(mod_path):
                 cfg = manifest_utils.get_mod(mod_path)

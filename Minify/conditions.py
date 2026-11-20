@@ -28,7 +28,7 @@ def is_compiler_found():
     # the DLC state on ACF is not reverted back to a falsy state when the
     # DLC doesn't exist for the native runtimes. Leading to the check always returning true.
     global workshop_installed
-    workshop_installed = os.path.exists(constants.dota_resource_compiler_path)
+    workshop_installed = not workshop_setup_skipped() and os.path.isfile(constants.dota_resource_compiler_path)
     if not workshop_installed and not base.HEADLESS:
         output.add_text("&error_no_workshop_tools_found_terminal", msg_type="warning")
     return workshop_installed
@@ -70,7 +70,7 @@ def resolve_dependencies():
                             )
                 else:
                     raise RuntimeError(f"Failed to download {constants.s2v_latest}")
-        elif os.path.exists(constants.s2v_executable):
+        elif os.path.exists(constants.s2v_executable) and not workshop_setup_skipped():
             fs.remove_path(constants.s2v_executable)
 
         rg_on_path = shutil.which(constants.rg_executable)
@@ -167,8 +167,28 @@ def is_workshop_required_mod(mod_path: str, manifest: dict | None = None) -> boo
     return False
 
 
+def workshop_setup_skipped():
+    return base.is_mac and os.environ.get("MINIFY_WORKSHOP_READY") == "0"
+
+
+def unavailable_session_mods():
+    if not workshop_setup_skipped():
+        return set()
+    blocked = {mod for mod in constants.mods_with_order if is_workshop_required_mod(os.path.join(base.mods_dir, mod))}
+    while True:
+        dependants = {
+            mod
+            for entry in constants.mod_dependencies_list
+            for mod, dependencies in entry.items()
+            if blocked.intersection(dependencies)
+        }
+        if dependants <= blocked:
+            return blocked
+        blocked.update(dependants)
+
+
 def disable_workshop_mods():
-    if not workshop_installed:
+    if not workshop_installed and not workshop_setup_skipped():
         from patch import manifest_utils
 
         for folder in constants.mods_with_order:

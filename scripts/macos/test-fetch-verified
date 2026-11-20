@@ -1,0 +1,26 @@
+#!/bin/bash
+set -eu
+root=$(mktemp -d)
+trap '/bin/rm -rf -- "$root"' EXIT
+# Replace only the network transport in a disposable copy; hashing and publication are real.
+sed "s@/usr/bin/curl @\"\$FIXTURE_CURL\" @" "$(cd -P "$(dirname "$0")" && pwd)/fetch-verified" > "$root/fetch"
+chmod +x "$root/fetch"
+cd "$root"
+export FIXTURE_CURL="$PWD/curl"
+cat > curl <<'STUB'
+#!/bin/sh
+while [ "$1" != --output ]; do shift; done
+printf abc > "$2"
+STUB
+chmod +x curl
+expected=ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad
+reject() { if "$@"; then echo >&2 "Unexpected download success"; exit 1; fi }
+reject ./fetch 'http://fixture.invalid/file' "$expected" out
+reject ./fetch 'https://fixture.invalid/file' "${expected%?}0" out
+[[ ! -e out ]]
+./fetch 'https://fixture.invalid/file' "$expected" out
+[[ $(<out) == abc && "$(xattr -p com.apple.quarantine out)" == *Minify* ]]
+echo keep > out
+reject ./fetch 'https://fixture.invalid/file' "$expected" out
+[[ $(<out) == keep ]]
+echo "Verified download checks passed."

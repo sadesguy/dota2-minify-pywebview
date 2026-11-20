@@ -47,6 +47,7 @@ def patcher(number: int = 66, mods_string: Optional[str] = None):
 
     try:
         mod_list = constants.mods_with_order
+        unavailable = conditions.unavailable_session_mods()
         explicit_mods = None
         explicit_mods_set = set()
 
@@ -62,9 +63,14 @@ def patcher(number: int = 66, mods_string: Optional[str] = None):
                 return
 
             explicit_mods_set = set(explicit_mods)
+            if blocked := sorted(unavailable & explicit_mods_set):
+                output.add_text(f"Workshop Tools are unavailable for: {', '.join(blocked)}", msg_type="error")
+                return
             mod_list = [mod for mod in constants.mods_with_order if mod in explicit_mods_set]
         else:
             mods_shared.enforce_locale_mod_states()
+            if unavailable:
+                mod_list = [mod for mod in mod_list if mod not in unavailable]
 
         script_mods = explicit_mods_set if explicit_mods is not None else None
 
@@ -115,10 +121,10 @@ def patcher(number: int = 66, mods_string: Optional[str] = None):
             while not dependencies_resolved:
                 for dependency_dict in constants.mod_dependencies_list:
                     for dependant, dependencies in dependency_dict.items():
-                        if mods_shared.get_state(dependant):
+                        if dependant not in unavailable and mods_shared.get_state(dependant):
                             for dependency in dependencies:
                                 try:
-                                    if not conditions.workshop_installed:
+                                    if not conditions.workshop_installed and not conditions.workshop_setup_skipped():
                                         workshop = False
                                         for method_path in conditions.workshop_required_methods:
                                             if os.path.exists(os.path.join(base.mods_dir, dependency, method_path)):
@@ -387,7 +393,7 @@ def patcher(number: int = 66, mods_string: Optional[str] = None):
         )
 
         # handle language option automatically
-        if config.get("fix_options"):
+        if not base.is_mac and config.get("fix_options"):
             steam.fix_boot_language()
             launch_needs_fix = bool(steam.fix_launch_options(check_only=True))
             prelaunch_needs_fix = bool(steam.add_prelaunch_to_launch_options(check_only=True))

@@ -9,8 +9,12 @@ from core import base
 
 base.original_cwd = os.getcwd()
 
-# Ensure root directories
-if getattr(sys, "frozen", False):
+if base.is_mac and base.FROZEN:
+    from core import macos_app
+
+    macos_app.prepare(base.base_dir, base.mac_app_resources, sys.argv)
+    os.chdir(base.base_dir)
+elif base.FROZEN:
     os.chdir(os.path.dirname(os.path.realpath(sys.executable)))
 else:
     os.chdir(current_dir)

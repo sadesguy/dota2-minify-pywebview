@@ -1,0 +1,13 @@
+#!/bin/bash
+# Python reads only the four NUL-terminated values from stdout.
+set -eu
+helpers=$(cd "$(dirname "$0")" && pwd -P)
+{
+    . "$helpers/prepare-wine"
+    prepare_wine
+    "$helpers/prepare-workshop"
+    . "$helpers/prepare-dxvk"
+    prepare_dxvk
+    "$helpers/check-workshop"
+} >&2
+printf '%s\0' "$MINIFY_WINE" "$WINEPREFIX" "$PATH" "${MINIFY_DXVK_COMPILER:-}"

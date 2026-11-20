@@ -262,11 +262,24 @@ class Api:
 
         return bool(conditions.workshop_installed)
 
+    def should_offer_workshop_download(self, manual: bool = False) -> bool:
+        if base.is_mac and "MINIFY_WORKSHOP_READY" in os.environ:
+            return False  # Packaged macOS runs setup directly, including toolbar retries.
+        return manual or not self.get_state("ignore_workshop_download")
+
     def download_workshop_tools(self) -> bool:
         import tempfile
         import requests
         import conditions
         from core import fs, log
+
+        if base.is_mac and base.FROZEN:
+            from core import macos_app
+
+            if macos_app.is_packaged(base.base_dir, base.mac_app_resources):
+                ready = macos_app.setup_workshop(base.base_dir, base.mac_app_resources, gui=True)
+                constants.recalc_rescomp_dirs()
+                return conditions.is_compiler_found() and ready
 
         repo_url = (
             "https://github.com/Dota-Modding-Community/workshoptools/releases/latest/download/resourcecompiler.zip"

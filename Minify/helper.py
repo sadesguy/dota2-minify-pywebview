@@ -7,9 +7,8 @@ import subprocess
 import sys
 from pathlib import Path
 
-import vpk
 from core import base, config, constants, fs, log, mods_shared, output, utils
-from patch import manifest_utils, validators
+from patch import manifest_utils, validators, vpk_utils
 
 compiler_filepicker_path = ""
 output_path = config.get("output_path", constants.minify_default_dota_pak_output_path)
@@ -107,8 +106,7 @@ def compile_assets(input_path=None, output_path=None, pak_path=None):
         output.add_text("&compile_successful", output_path)
 
         if pak_path:
-            vpk_file = vpk.new(output_path)
-            vpk_file.save(pak_path)
+            vpk_utils.pack(output_path, pak_path, chunk_size=None)
             output.add_text("&compile_created_pak", pak_path)
     else:
         output.add_text("&compile_no_path")
@@ -205,12 +203,16 @@ def bulk_exec_script(order_name, terminal_output=True, mods=None):
 
     When `mods` is provided, only scripts for those mods are executed.
     """
+    import conditions
+
     bulk_name = f"script_{order_name}.py"
     any_ran = False
 
     mod_names = constants.mods_with_order
     if mods is not None:
         mod_names = [mod for mod in mod_names if mod in mods]
+    elif order_name not in ("initial", "uninstall") and (blocked := conditions.unavailable_session_mods()):
+        mod_names = [mod for mod in mod_names if mod not in blocked]
 
     for mod_name in mod_names:
         root = os.path.join(base.mods_dir, mod_name)

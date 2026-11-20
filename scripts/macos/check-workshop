@@ -1,0 +1,79 @@
+#!/bin/bash
+# Probe only the private tools copy, never the playable Steam installation.
+set -eu
+umask 077
+die() { echo >&2 "$*"; exit 1; }
+[[ $# == 0 || ( $# == 1 && $1 == --force ) ]] || die "Usage: check-workshop [--force]"
+cd -P .
+root="$PWD/config/rescomproot"
+compiler="$root/game/bin/win64/resourcecompiler.exe"
+prefix="$PWD/config/wineprefix"
+[[ ${WINEPREFIX:-} == "$prefix" && -d $prefix && $(/bin/realpath "$prefix") == "$prefix" ]] || die "Run the macOS launcher to prepare Minify's private Wine prefix."
+[[ -s $compiler && -f $compiler && $(/bin/realpath "$compiler") == "$compiler" ]] || die "Missing or symlinked private Workshop compiler. Run prepare-workshop first."
+wine=$(type -P wine) || die "No prepared Wine on PATH."
+[[ -x ${MINIFY_WINE:-} ]] || die "Run the macOS launcher to select the Wine runtime."
+marker="$root/.minify-js-probe"
+[[ ! -L $marker && ( ! -e $marker || -f $marker ) ]] || die "Unexpected Workshop check marker: $marker"
+runtime=$(/bin/realpath "$MINIFY_WINE")
+key="minify-js-probe-v1
+$wine
+$runtime
+${MINIFY_DXVK_COMPILER:-valve-vulkan}
+$(/usr/bin/stat -f '%d:%i:%m:%z' "$wine" "$runtime" "$compiler")
+$(/usr/bin/stat -f '%d:%i' "$prefix")"
+if [[ -e $marker ]]; then
+    cached=$(<"$marker")
+    [[ $cached == minify-js-probe-v1$'\n'* ]] || die "Unrecognized Workshop check marker, leaving untouched: $marker"
+    [[ ${1:-} != --force && $cached == "$key" ]] && exit 0
+    /bin/rm -- "$marker"
+fi
+
+# Both sides have to be reserved before Wine runs: the compiler mirrors content/ into game/.
+for dir in "$root"/{content,game} "$root"/{content,game}/dota_addons; do
+    [[ ! -L $dir ]] || die "Refusing symlinked Workshop addon path: $dir"
+    mkdir -p -- "$dir"
+done
+work_id=$(/usr/bin/uuidgen | /usr/bin/tr A-F a-f)
+name="minify_probe_${work_id%%-*}"
+src="$root/content/dota_addons/$name"
+out=''
+marktmp=''
+mkdir -- "$src" || die "Cannot reserve Workshop test input: $src"
+cleanup() {
+    [[ -z $marktmp ]] || /bin/rm -f -- "$marktmp"
+    for dir in "$src" "$out"; do
+        [[ -z $dir || $(/bin/realpath -q "$dir") != "$dir" ]] || /bin/rm -rf -- "$dir"
+    done
+}
+trap cleanup EXIT
+trap 'exit 1' HUP INT TERM
+mkdir -- "$root/game/dota_addons/$name" || die "Cannot reserve Workshop test output."
+out="$root/game/dota_addons/$name"
+mkdir -p "$src/panorama/scripts"
+printf '%s\n' '$.Msg("Minify Workshop Tools check");' > "$src/panorama/scripts/check.js"
+log=$(mktemp "$root/.minify-workshop-log.XXXXXXXX")
+probe_failed() {
+    if [[ -f "${compiler%/*}/rendersystemdx11.dll" && ! -f "${compiler%/*}/rendersystemvulkan.dll" ]]; then
+        echo >&2 "These tools contain only the DirectX 11 renderer; rendersystemvulkan.dll is missing. Check DXVK setup in the macOS launcher, use compatible full Windows tools, or use --skip-setup for regular mods."
+    fi
+    die "$1 Log: $log"
+}
+printf '%s\n' "Checking Workshop Tools: compiling a Panorama script with Wine..."
+# Match Minify/helper.py: relative input wildcard passed literally to resourcecompiler.exe.
+"$wine" "$compiler" -i "config/rescomproot/content/dota_addons/$name/*" -r > "$log" 2>&1 || probe_failed "Workshop compiler failed."
+if ! LC_ALL=C /usr/bin/awk '
+    { line=tolower($0); sub(/^[[:space:]]*([a-z ]+:[[:space:]]*)?/, "", line) }
+    line ~ /^[0-9]+[[:space:]]+compiled,[[:space:]]*[0-9]+[[:space:]]+failed,[[:space:]]*[0-9]+[[:space:]]+skipped([,[:space:]]|$)/ {
+        split(line, counts, ","); compiled += counts[1]+0; failed += counts[2]+0
+    }
+    END { exit !(compiled > 0 && failed == 0) }' "$log"; then
+    probe_failed "Workshop compiler did not report successful compilation."
+fi
+artifact="$out/panorama/scripts/check.vjs_c"
+[[ -f $artifact && -s $artifact && $(/bin/realpath "$artifact") == "$artifact" ]] || probe_failed "Workshop compiler did not produce the expected .vjs_c file."
+marktmp=$(mktemp "$root/.minify-probe-result.XXXXXXXX")
+printf '%s\n' "$key" > "$marktmp"
+/bin/mv -fh -- "$marktmp" "$marker"
+marktmp=''
+/bin/rm -- "$log"
+printf '%s\n' "Workshop Tools verified: the Windows compiler produced check.vjs_c."

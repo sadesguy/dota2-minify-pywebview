@@ -1,0 +1,67 @@
+#!/bin/bash
+set -eu
+checker=$(cd -P "$(dirname "$0")" && pwd)/check-workshop
+tmp=$(mktemp -d)
+tmp=$(cd -P "$tmp" && pwd)
+trap '/bin/rm -rf -- "$tmp"' EXIT
+app="$tmp/Minify fixture"
+mkdir -p "$app"/config/{rescomproot/game/bin/win64,wineprefix} "$tmp/bin" "$tmp/foreign"
+cd "$app"
+export WINEPREFIX="$PWD/config/wineprefix" PATH="$tmp/bin:/usr/bin:/bin" HOME="$tmp" TRACE="$tmp/calls"
+export MINIFY_WINE="$tmp/bin/runtime"
+touch "$MINIFY_WINE"; chmod +x "$MINIFY_WINE"
+root="$PWD/config/rescomproot"
+echo fake > "$root/game/bin/win64/resourcecompiler.exe"
+cat > "$tmp/bin/wine" <<'STUB'
+#!/bin/bash
+set -eu
+[[ $1 == "$PWD/config/rescomproot/game/bin/win64/resourcecompiler.exe" && $2 == -i && $4 == -r ]]
+source_dir=${3%/*}
+[[ -s "$source_dir/panorama/scripts/check.js" ]]
+echo called >> "$TRACE"
+out="${source_dir/content/game}/panorama/scripts"
+mkdir -p "$out"
+case "${RESULT:-ok}" in
+    fail) echo "Wine failed"; exit 7 ;;
+    zero) echo "OK: 0 compiled, 0 failed, 1 skipped" ;;
+    missing) echo "OK: 1 compiled, 0 failed, 0 skipped"; exit 0 ;;
+    mixed) echo "ERROR: 2 compiled, 1 failed, 0 skipped"; echo "OK: 1 compiled, 0 failed, 0 skipped" ;;
+    symlink) echo "OK: 1 compiled, 0 failed, 0 skipped"; ln -s "$TRACE" "$out/check.vjs_c"; exit 0 ;;
+    *) printf 'WARNING: 1 compiled, 0 failed, 0 skipped, 0m:00s\r\n' ;;
+esac
+echo synthetic > "$out/check.vjs_c"
+STUB
+chmod 755 "$tmp/bin/wine"
+reject() { if "$@" > "$tmp/error" 2>&1; then echo >&2 -- "Unexpected success: $*"; exit 1; fi; }
+reject env WINEPREFIX="$tmp/foreign" "$checker"
+mkdir -p "$root/content"
+ln -s "$tmp/foreign" "$root/content/dota_addons"
+reject "$checker"
+[[ -z "$(ls -A "$tmp/foreign")" && ! -e $TRACE ]]
+unlink "$root/content/dota_addons"
+ln -s "$tmp/foreign" "$root/.minify-js-probe"
+reject "$checker"
+unlink "$root/.minify-js-probe"
+"$checker"
+"$checker"
+[[ $(wc -l < "$TRACE") -eq 1 ]]
+"$checker" --force
+[[ $(wc -l < "$TRACE") -eq 2 ]]
+echo changed >> "$MINIFY_WINE"
+"$checker"
+[[ $(wc -l < "$TRACE") -eq 3 ]]
+touch "$root/game/bin/win64/rendersystemdx11.dll"
+for kind in fail zero missing mixed symlink; do
+    reject env RESULT="$kind" "$checker" --force
+    [[ ! -e "$root/.minify-js-probe" ]]
+    grep -q 'Log:' "$tmp/error"
+    grep -q 'rendersystemvulkan.dll is missing.*--skip-setup' "$tmp/error"
+    [[ -z "$(ls -A "$root/content/dota_addons")" && -z "$(ls -A "$root/game/dota_addons")" ]]
+done
+logs=("$root"/.minify-workshop-log.*)
+[[ ${#logs[@]} -eq 5 && -s ${logs[0]} ]]
+touch "$root/game/bin/win64/rendersystemvulkan.dll"
+reject env RESULT=fail "$checker"
+if grep -q 'rendersystemvulkan.dll is missing' "$tmp/error"; then exit 1; fi
+"$checker"
+echo "Workshop compiler acceptance fixtures passed."

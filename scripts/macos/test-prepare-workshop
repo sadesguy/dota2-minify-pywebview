@@ -1,0 +1,162 @@
+#!/bin/bash
+set -eu
+unset MINIFY_SETUP_GUI
+helper=$(cd -P "$(dirname "$0")" && pwd)/prepare-workshop
+root=$(mktemp -d "${TMPDIR:-/tmp}/minify-workshop-test.XXXXXXXX")
+trap '/bin/rm -rf -- "$root"' EXIT
+export HOME="$root/home"
+unset MINIFY_DOTA_WINDOWS MINIFY_STEAM_LIBRARY
+prefix="$HOME/Library/Application Support/Steam"
+src="$prefix/steamapps/common/dota 2 beta"
+mkdir -p "$root/app" "$src"/game/{bin/win64,core,dota/bin/win64,dota/tools}
+for item in game/bin/win64/{resourcecompiler.exe,resourcecompiler.dll,tier0.dll,smartprops.dll} game/core/pak01_dir.vpk game/dota/gameinfo.gi; do
+    echo fixture > "$src/$item"
+done
+cd "$root/app"
+reject() {
+    if "$@" </dev/null; then echo >&2 "Expected rejection: $*"; exit 1; fi
+}
+
+# Finder has no terminal. Exercise its choices without displaying dialogs or running interpolated AppleScript.
+sed "s@/usr/bin/osascript @\"\$DIALOG\" @" "${helper%/*}/confirm" > "$root/confirm"
+chmod +x "$root/confirm"
+export DIALOG="$root/dialog" GUI_PROMPT='Download from path "a"; $?'
+cat > "$DIALOG" <<'DIALOG'
+#!/bin/sh
+[ "$#" -eq 2 ] && [ "$1" = - ] && [ "$2" = "$GUI_PROMPT" ] && grep -Fq 'item 1 of argv' || exit 3
+printf '%s\n' "$BUTTON"
+DIALOG
+chmod +x "$DIALOG"
+MINIFY_SETUP_GUI=1 BUTTON=Continue "$root/confirm" "$GUI_PROMPT" </dev/null
+rc=0; MINIFY_SETUP_GUI=1 BUTTON=Skip "$root/confirm" "$GUI_PROMPT" </dev/null || rc=$?
+[[ $rc == 2 ]]
+rc=0; MINIFY_SETUP_GUI=1 BUTTON=Continue "$root/confirm" 'wrong argument' </dev/null || rc=$?
+[[ $rc == 1 ]]
+rc=0; MINIFY_SETUP_GUI=0 BUTTON=Continue "$root/confirm" "$GUI_PROMPT" </dev/null || rc=$?
+[[ $rc == 1 ]]
+
+reject "$helper"
+reject env MINIFY_DOTA_WINDOWS="$root/missing" "$helper" --import
+[[ ! -e config ]]
+ln -s "$root" config
+reject "$helper" --import
+[[ -L config && ! -e "$root/rescomproot" ]]
+unlink config
+mkdir config
+ln -s "$root/missing" config/rescomproot
+reject "$helper" --import
+[[ -L config/rescomproot && ! -e "$root/missing" ]]
+unlink config/rescomproot
+
+mkdir config/rescomproot
+echo keep > config/rescomproot/existing
+reject "$helper" --import
+[[ $(<config/rescomproot/existing) == keep ]]
+mv config/rescomproot "$root/preexisting"
+
+ln -s "$root/nope" "$src/game/bin/foreign-link"
+reject "$helper" --import
+[[ ! -e config/rescomproot && -z "$(ls -A config)" ]]
+unlink "$src/game/bin/foreign-link"
+"$helper" --import
+dst='config/rescomproot/game/bin/win64/resourcecompiler.exe'
+[[ "$dst" -ef "$src/game/bin/win64/resourcecompiler.exe" ]] && exit 1
+echo independent > "$src/game/bin/win64/resourcecompiler.exe"
+"$helper"
+[[ $(<"$dst") == fixture && ! -e config/rescomproot/steamapps ]]
+mv config/rescomproot "$root/imported"
+
+export MINIFY_STEAM_LIBRARY="$root/external library"
+mv "$prefix" "$MINIFY_STEAM_LIBRARY"
+export MINIFY_DOTA_WINDOWS="$MINIFY_STEAM_LIBRARY/steamapps/common/dota 2 beta"
+mv "$MINIFY_DOTA_WINDOWS/game/bin/win64/smartprops.dll" "$root/hold.dll"
+reject "$helper" --import
+[[ ! -e config/rescomproot ]]
+mv "$root/hold.dll" "$MINIFY_DOTA_WINDOWS/game/bin/win64/smartprops.dll"
+unset MINIFY_DOTA_WINDOWS
+"$helper" --import
+[[ $(<"$dst") == independent ]]
+
+# The app prefers Steam over the adjacent portable installation. The latter needs consent.
+bundled="$root/My App.app/Contents/Resources/macos/prepare-workshop"
+portable="$root/Minify/config/rescomproot"
+mkdir -p "${bundled%/*}" "${portable%/*}" "$root/upgrade"
+cp "$helper" "$bundled"
+cp "${helper%/*}/confirm" "${bundled%/*}/"
+cp -R "$root/imported" "$portable"
+cd "$root/upgrade"
+"$bundled" --import
+[[ $(<"$dst") == independent ]]
+mv config/rescomproot "$root/from-steam"
+unset MINIFY_STEAM_LIBRARY
+reject "$bundled" --import
+[[ ! -e config/rescomproot ]]
+export BUNDLED="$bundled"
+/usr/bin/expect <<'EXPECT'
+set timeout 10
+spawn -noecho $env(BUNDLED)
+expect {
+    -exact {[y/N] } { send "y\r" }
+    timeout { exit 2 }
+    eof { exit 3 }
+}
+expect eof
+exit [lindex [wait] 3]
+EXPECT
+[[ $(<"$dst") == fixture && ! -e config/rescomproot/.minify-js-probe ]]
+
+# A fake downloader substitutes test bytes only after checking the exact release URL and SHA.
+mkdir -p "$root/fakes" "$root/download"
+cp "$helper" "$root/fakes/prepare-workshop"
+helper="$root/fakes/prepare-workshop"
+cat > "$root/fakes/fetch-verified" <<'MOCK'
+#!/bin/bash
+set -eu
+[[ $1 == https://github.com/Dota-Modding-Community/workshoptools/releases/download/v1.0.1/resourcecompiler.zip && $2 == 9b22dff52ce4da9553a1112cfec79dfc87739cda08865b4417bcddaf973b2107 ]]
+cp "$FIXTURE_ZIP" "$3"
+xattr -w com.apple.quarantine '0083;0;Fixture;' "$3"
+MOCK
+chmod +x "$root/fakes/fetch-verified"
+cd "$root/download"
+reject "$helper" --import
+[[ ! -e config ]]
+python3 -B - "$root" <<'PY'
+import stat, sys
+from pathlib import Path
+from zipfile import ZIP_LZMA, ZipFile, ZipInfo
+root = Path(sys.argv[1])
+members = [
+    "bin/win64/" + n for n in ("resourcecompiler.exe", "resourcecompiler.dll", "tier0.dll", "smartprops.dll", "rendersystemdx11.dll")
+] + ["core/gameinfo.gi", "core/panorama/panorama_config.txt", "dota/bin/win64/modtools.dll", "dota/tools/workshop_addoninfo.fgd", "dota/gameinfo.gi"]
+for variant in ("ok", "missing", "parent-path", "link"):
+    with ZipFile(root / (variant + ".zip"), "w", compression=ZIP_LZMA) as z:
+        for name in members:
+            if variant == "missing" and name.endswith("panorama_config.txt"):
+                continue
+            z.writestr("resourcecompiler/game/" + name, "test mirror bytes")
+        if variant == "parent-path":
+            z.writestr("resourcecompiler/game/core/../duplicate", "non-canonical")
+        if variant == "link":
+            link = ZipInfo("resourcecompiler/game/alias")
+            link.create_system = 3
+            link.external_attr = (stat.S_IFLNK | 0o777) << 16
+            z.writestr(link, "core")
+            z.writestr("resourcecompiler/game/alias/file.txt", "child of link")
+PY
+for bad in missing parent-path link; do
+    reject env FIXTURE_ZIP="$root/$bad.zip" "$helper" --download
+    [[ ! -e config/rescomproot && -z "$(ls -A config)" ]]
+done
+for gui in 0 1; do
+    mkdir "$root/download/$gui"; cd "$root/download/$gui"
+    MINIFY_SETUP_GUI=$gui FIXTURE_ZIP="$root/ok.zip" "$helper" </dev/null
+    [[ $(<"$dst") == 'test mirror bytes' && $(xattr -p com.apple.quarantine "$dst") == '0083;0;Fixture;' ]]
+    MINIFY_SETUP_GUI=$gui FIXTURE_ZIP="$root/must-not-refetch.zip" "$helper" </dev/null
+done
+
+mkdir "$root/concurrent"; cd "$root/concurrent"
+FIXTURE_ZIP="$root/ok.zip" "$helper" --download > "$root/first" 2>&1 & first=$!
+FIXTURE_ZIP="$root/ok.zip" "$helper" --download > "$root/second" 2>&1 & second=$!
+result=1; wait "$first" && result=0; wait "$second" && result=0
+[[ $result == 0 && $(<"$dst") == 'test mirror bytes' && $(ls -A config) == rescomproot ]]
+echo "Workshop setup fixture checks passed."
