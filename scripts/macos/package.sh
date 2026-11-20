@@ -86,6 +86,13 @@ for item in "$contents/Frameworks"/*; do
     mv "$item" "$resources/$name"
     ln -s "../Resources/$name" "$item"
 done
+# codesign mistakes python3.13 for a nested bundle. Keep Python's import path as a symlink.
+for item in "$contents/Frameworks"/python3.*; do
+    [[ -d $item && ! -L $item ]] || continue
+    name=${item##*/}
+    mv "$item" "$contents/Frameworks/${name//./__dot__}"
+    ln -s "${name//./__dot__}" "$item"
+done
 for item in mods plugins themes README.md LICENSE; do ditto --norsrc "$src/$item" "$resources/defaults/$item"; done
 for item in setup-workshop prepare-workshop check-workshop fetch-verified prepare-wine prepare-dxvk launcher-bin macos.md; do
     ditto --norsrc "$portable/$item" "$resources/macos/$item"
