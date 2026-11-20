@@ -364,7 +364,7 @@ def patcher(number: int = 66, mods_string: Optional[str] = None):
         # -------- Create VPK from game folder and save into Minify directory -------- #
         # ---------------------------------------------------------------------------- #
 
-        vpk_utils.dump_metadata(constants.minify_dota_compile_output_path)
+        vpk_utils.dump_metadata(constants.minify_dota_compile_output_path, selected_mods=explicit_mods)
 
         fs.create_dirs(helper.output_path)
         output.add_text("&compiling_terminal")

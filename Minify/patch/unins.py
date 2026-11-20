@@ -1,5 +1,6 @@
 import os
 import re
+from pathlib import Path
 
 import helper
 from core import constants, fs, output, registry, steam
@@ -15,16 +16,15 @@ def uninstall():
         if os.path.isdir(path):
             maps_vpk_path = os.path.join(path, "maps", "dota.vpk")
             if os.path.exists(maps_vpk_path) and vpk_utils.is_minify_pak(maps_vpk_path):
-                fs.remove_path(os.path.join(path, "maps"))
+                fs.remove_path(maps_vpk_path)
 
             for item in os.listdir(path):
                 pak_path = os.path.join(path, item)
                 if os.path.isfile(pak_path) and re.fullmatch(pak_pattern, item):
                     if vpk_utils.is_minify_pak(pak_path):
-                        prefix = item.split("_")[0]
-                        for sibling in os.listdir(path):
-                            if sibling.startswith(f"{prefix}_") and sibling.endswith(".vpk"):
-                                fs.remove_path(os.path.join(path, sibling))
+                        for sibling in vpk_utils.chunk_names(Path(pak_path)):
+                            Path(path, sibling).unlink(missing_ok=True)
+                        fs.remove_path(pak_path)
 
     steam.remove_minify_lang()
     steam.restore_boot_language()

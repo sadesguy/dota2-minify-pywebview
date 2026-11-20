@@ -1,10 +1,37 @@
 import hashlib
+import json
 import os
 import struct
 from unittest.mock import patch
 
+import pytest
 import vpk
 from patch import vpk_utils
+
+
+@pytest.mark.parametrize(
+    ("saved", "selected", "expected"),
+    [
+        (None, ["Explicit"], {"Explicit": True}),
+        ({"Saved": True}, ["Explicit"], {"Explicit": True}),
+        ({"Saved": True, "Off": False}, None, {"Saved": True, "Off": False}),
+        (None, None, {}),
+    ],
+)
+def test_metadata_uses_effective_selection_without_changing_saved_mods(
+    tmp_path, monkeypatch, saved, selected, expected
+):
+    saved_file = tmp_path / "mods.json"
+    if saved is not None:
+        saved_file.write_text(json.dumps(saved))
+    monkeypatch.setattr(vpk_utils.base, "mods_config_dir", str(saved_file))
+    monkeypatch.setattr(vpk_utils.constants, "dota_steam_inf_path", str(tmp_path / "steam.inf"))
+    output = tmp_path / "output"
+    vpk_utils.dump_metadata(str(output), selected_mods=selected)
+    assert json.loads((output / "minify_mods.json").read_bytes()) == expected
+    assert (saved_file.read_text() if saved_file.is_file() else None) == (
+        json.dumps(saved) if saved is not None else None
+    )
 
 
 def test_dump_metadata_default_behavior(tmp_path):
@@ -168,6 +195,36 @@ def test_pack_non_chunked_and_read(tmp_path):
     assert pak.get_file("second.txt").read().decode("utf-8") == "Another file"
 
 
+@pytest.mark.parametrize("chunk_size", [None, 8], ids=["embedded", "chunked"])
+def test_pack_skips_macos_metadata_without_losing_assets(tmp_path, chunk_size):
+    source = tmp_path / "source"
+    assets = {
+        "models/hero.vmdl_c": b"model bytes",
+        "particles/effect.vpcf_c": b"particle bytes",
+        ".example": b"hidden file",
+        "LICENSE": b"extensionless file",
+    }
+    if os.name != "nt":
+        assets["trailing."] = b"trailing dot"
+    junk = [".DS_Store", "particles/.ds_store", "models/._hero.vmdl_c", "nested/__MACOSX/deeper/preview.png"]
+    for name, data in (assets | dict.fromkeys(junk, b"metadata")).items():
+        path = source / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(data)
+
+    index = str(tmp_path / "pak66_dir.vpk")
+    vpk_utils.pack(str(source), index, chunk_size=chunk_size)
+    pak = vpk.open(index)
+    # vpk 1.4 exposes the format's single-space extension sentinel as a literal ". " suffix.
+    names = {name.removesuffix(". "): name for name in pak}
+    assert names.keys() == assets.keys()
+    for name, data in assets.items():
+        with pak[names[name]] as entry:
+            assert entry.verify()
+            assert entry.read() == data
+            assert (entry.archive_index == 0x7FFF) == (chunk_size is None)
+
+
 def test_pack_cleans_stale_chunks(tmp_path):
     source_dir = tmp_path / "source"
     source_dir.mkdir()
@@ -180,8 +237,93 @@ def test_pack_cleans_stale_chunks(tmp_path):
     # First pack with 300 byte chunks creates multiple chunks
     vpk_utils.pack(str(source_dir), dir_vpk_path, chunk_size=300)
     assert (out_dir / "pak66_001.vpk").exists()
+    neighbors = [out_dir / "pak66_001_backup.vpk", out_dir / "pak66_999.vpk"]
+    for neighbor in neighbors:
+        neighbor.write_bytes(b"keep")
 
     # Second pack with 10MB chunk fits in a single chunk (_000.vpk)
     vpk_utils.pack(str(source_dir), dir_vpk_path, chunk_size=10 * 1024 * 1024)
     assert (out_dir / "pak66_000.vpk").exists()
     assert not (out_dir / "pak66_001.vpk").exists()
+    assert all(neighbor.read_bytes() == b"keep" for neighbor in neighbors)
+
+
+def test_pack_bad_index_preserves_previous_pak_and_chunks(tmp_path):
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "a.txt").write_bytes(b"old a")
+    (source / "b.txt").write_bytes(b"old b")
+    output = tmp_path / "out"
+    index = str(output / "pak66_dir.vpk")
+    vpk_utils.pack(str(source), index, chunk_size=5)
+    before = {p.name: p.read_bytes() for p in output.iterdir()}
+    assert set(before) == {"pak66_dir.vpk", "pak66_000.vpk", "pak66_001.vpk"}
+
+    (source / "a.txt").write_bytes(b"new content")
+    with patch.object(vpk_utils.vpk, "open", side_effect=ValueError("unreadable index")), pytest.raises(ValueError):
+        vpk_utils.pack(str(source), index, chunk_size=5)
+    assert {p.name: p.read_bytes() for p in output.iterdir()} == before
+
+    with pytest.raises(FileNotFoundError):
+        vpk_utils.pack(str(tmp_path / "missing"), index)
+    assert {p.name: p.read_bytes() for p in output.iterdir()} == before
+
+
+def test_pack_does_not_overwrite_unclaimed_chunks(tmp_path):
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "asset.txt").write_bytes(b"new")
+    index = tmp_path / "pak66_dir.vpk"
+    chunk = tmp_path / "pak66_000.vpk"
+    index.write_bytes(b"broken old index")
+    chunk.write_bytes(b"unknown owner")
+    with pytest.raises(FileExistsError, match="unclaimed VPK chunk"):
+        vpk_utils.pack(source, index)
+    assert index.read_bytes() == b"broken old index" and chunk.read_bytes() == b"unknown owner"
+    vpk_utils.pack(source, index, chunk_size=None)
+    with vpk.open(str(index))["asset.txt"] as entry:
+        assert entry.read() == b"new"
+    assert chunk.read_bytes() == b"unknown owner"
+
+
+def test_pack_standalone_leaves_sibling_packages_untouched(tmp_path):
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "map.vmap_c").write_bytes(b"compiled map")
+    output = tmp_path / "maps"
+    output.mkdir()
+    siblings = {"dota_000.vpk": b"unrelated chunk", "dota_other.vpk": b"unrelated pak"}
+    for name, data in siblings.items():
+        (output / name).write_bytes(data)
+
+    index = str(output / "dota.vpk")
+    vpk_utils.pack(str(source), index, chunk_size=None)
+    with vpk.open(index)["map.vmap_c"] as entry:
+        assert entry.read() == b"compiled map"
+    assert {name: (output / name).read_bytes() for name in siblings} == siblings
+
+
+def test_uninstall_preserves_other_paks_and_maps(tmp_path, monkeypatch):
+    from patch import unins
+
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "minify_version.txt").write_text("2")
+    language = tmp_path / "language"
+    maps = language / "maps"
+    maps.mkdir(parents=True)
+    vpk_utils.pack(source, language / "pak66_dir.vpk")
+    vpk_utils.pack(source, maps / "dota.vpk", chunk_size=None)
+    other = (maps / "my_map.vpk", language / "pak66_backup.vpk", language / "pak66_111.vpk")
+    for neighbor in other:
+        neighbor.write_bytes(b"keep")
+    monkeypatch.setattr(unins.constants, "minify_dota_possible_language_output_paths", [str(language)])
+    monkeypatch.setattr(unins.steam, "remove_minify_lang", lambda: None)
+    monkeypatch.setattr(unins.steam, "restore_boot_language", lambda: None)
+    monkeypatch.setattr(unins.registry, "get_plugins", lambda: [])
+    monkeypatch.setattr(unins.helper, "bulk_exec_script", lambda *_: None)
+    unins.uninstall()
+    assert not (maps / "dota.vpk").exists()
+    assert not (language / "pak66_dir.vpk").exists()
+    assert not (language / "pak66_000.vpk").exists()
+    assert all(neighbor.read_bytes() == b"keep" for neighbor in other)

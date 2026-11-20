@@ -3,8 +3,10 @@ import hashlib
 import os
 import shutil
 import struct
+import tempfile
 import threading
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 
 import vpk
 from core import base, config, constants, fs, log, output, utils
@@ -19,33 +21,65 @@ def pack(source_dir, output_vpk_dir_path, chunk_size: int | None = DEFAULT_VPK_C
     Each external archive is capped at chunk_size bytes. When chunk_size is None,
     file data is embedded in the directory VPK.
     """
+    index = Path(output_vpk_dir_path)
+    if chunk_size is not None and not index.name.endswith("_dir.vpk"):
+        raise ValueError("A chunked VPK needs a name ending in _dir.vpk")
+    index.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(dir=index.parent) as tmp:
+        staged = Path(tmp) / index.name
+        _write_vpk(source_dir, staged, chunk_size)
+        chunks = {p.name for p in staged.parent.iterdir() if p != staged}
+        previous = chunk_names(index)
+        for name in chunks - previous:
+            if os.path.lexists(index.with_name(name)):
+                raise FileExistsError(f"Move the unclaimed VPK chunk aside before packing: {index.with_name(name)}")
+        for name in chunks:
+            staged.with_name(name).replace(index.with_name(name))
+        staged.replace(index)
+
+    for name in previous - chunks:
+        index.with_name(name).unlink(missing_ok=True)
+
+
+def chunk_names(index: Path) -> set[str]:
+    if not index.name.endswith("_dir.vpk"):
+        return set()
+    try:
+        pak = vpk.open(str(index), read_header_only=False)
+        numbers = {pak.get_file_meta(name)["archive_index"] for name in pak}
+    except (FileNotFoundError, ValueError, struct.error, AssertionError):
+        # A missing or broken index cannot identify which neighboring chunks it owns.
+        return set()
+    return {f"{index.stem.removesuffix('_dir')}_{number:03d}.vpk" for number in numbers if number != 0x7FFF}
+
+
+def _macos_metadata(name):
+    return name.lower() in {".ds_store", "__macosx"} or name.startswith("._")
+
+
+def _write_vpk(source_dir, output_vpk_dir_path, chunk_size):
     base_name = os.path.splitext(output_vpk_dir_path)[0]
-    chunk_prefix = base_name[:-4] if base_name.endswith("_dir") else base_name
-    output_dir = os.path.dirname(output_vpk_dir_path) or "."
-    fs.create_dirs(output_dir)
+    chunk_prefix = base_name.removesuffix("_dir")
 
-    # Clean up any existing dir and chunk files for this prefix
-    prefix_filename = os.path.basename(chunk_prefix)
-    if os.path.isdir(output_dir):
-        for item in os.listdir(output_dir):
-            if item.startswith(f"{prefix_filename}_") and item.endswith(".vpk"):
-                fs.remove_path(os.path.join(output_dir, item))
+    def fail_on_unreadable_directory(error):
+        raise error  # os.walk otherwise silently skips inaccessible or missing input.
 
-    # Collect files into extension -> relpath -> [(filename_no_ext, full_filename, abs_path)]
+    # VPK directory order: extension, directory, filename.
     tree = {}
-    for root, _, filenames in os.walk(source_dir):
+    for root, dirs, filenames in os.walk(source_dir, onerror=fail_on_unreadable_directory):
+        dirs[:] = sorted(d for d in dirs if not _macos_metadata(d))
         rel = os.path.relpath(root, source_dir).replace("\\", "/")
         if rel == ".":
             rel = " "
 
-        for filename in filenames:
-            parts = filename.rsplit(".", 1)
-            if len(parts) == 1:
-                name, ext = parts[0], " "
-            else:
-                name, ext = parts[0], parts[1]
-
-            tree.setdefault(ext, {}).setdefault(rel, []).append((name, filename, os.path.join(root, filename)))
+        for filename in sorted(filenames):
+            if _macos_metadata(filename):
+                continue
+            name, suffix = os.path.splitext(filename)
+            ext = suffix[1:] or " "  # An empty extension would terminate the VPK index.
+            if suffix == ".":
+                name = filename
+            tree.setdefault(ext, {}).setdefault(rel, []).append((name, os.path.join(root, filename)))
 
     # Calculate tree length in bytes
     tree_length = 0
@@ -53,7 +87,7 @@ def pack(source_dir, output_vpk_dir_path, chunk_size: int | None = DEFAULT_VPK_C
         tree_length += len(ext.encode("utf-8")) + 2
         for relpath, file_entries in relpaths.items():
             tree_length += len(relpath.encode("utf-8")) + 2
-            for name, _, _ in file_entries:
+            for name, _ in file_entries:
                 tree_length += len(name.encode("utf-8")) + 1 + 18
     tree_length += 1
 
@@ -63,7 +97,7 @@ def pack(source_dir, output_vpk_dir_path, chunk_size: int | None = DEFAULT_VPK_C
     current_chunk_size = 0
     current_chunk_file = None
     embedded_data_offset = 28 + tree_length
-    embedded = chunk_size is None
+    embedded = chunk_size is None or not tree
 
     def open_chunk_file(idx):
         return open(f"{chunk_prefix}_{idx:03d}.vpk", "wb")
@@ -75,9 +109,9 @@ def pack(source_dir, output_vpk_dir_path, chunk_size: int | None = DEFAULT_VPK_C
             current_chunk_file.seek(embedded_data_offset)
         else:
             current_chunk_file = open_chunk_file(current_chunk_idx)
-        for ext, relpaths in tree.items():
-            for relpath, file_entries in relpaths.items():
-                for name, full_name, src_path in file_entries:
+        for relpaths in tree.values():
+            for file_entries in relpaths.values():
+                for _, src_path in file_entries:
                     file_size = os.path.getsize(src_path)
                     if (
                         chunk_size is not None
@@ -136,7 +170,7 @@ def pack(source_dir, output_vpk_dir_path, chunk_size: int | None = DEFAULT_VPK_C
             tree_bytes.extend(ext.encode("utf-8") + b"\x00")
             for relpath, file_entries in relpaths.items():
                 tree_bytes.extend(relpath.encode("utf-8") + b"\x00")
-                for name, full_name, src_path in file_entries:
+                for name, src_path in file_entries:
                     tree_bytes.extend(name.encode("utf-8") + b"\x00")
                     crc, archive_idx, offset, length = file_entries_meta[src_path]
                     tree_bytes.extend(struct.pack("IHHIIH", crc, 0, archive_idx, offset, length, 0xFFFF))
@@ -165,6 +199,10 @@ def pack(source_dir, output_vpk_dir_path, chunk_size: int | None = DEFAULT_VPK_C
         f.write(tree_checksum)
         f.write(archive_md5_checksum)
         f.write(file_checksum.digest())
+
+    # Checksums alone can pass even when the directory tree cannot be read.
+    if len(vpk.open(output_vpk_dir_path)) != len(file_entries_meta):
+        raise ValueError(f"VPK index does not list every packed file: {output_vpk_dir_path}")
 
 
 def extract(vpk_to_extract_from, paths, path_to_extract_to=base.build_dir):
@@ -219,7 +257,7 @@ def is_minify_pak(vpk_path):
     return not pak_files.isdisjoint(marker_files)
 
 
-def dump_metadata(target_dir, mod_name=None, vpk_mods=None, extra_lists=None):
+def dump_metadata(target_dir, mod_name=None, vpk_mods=None, extra_lists=None, *, selected_mods=None):
     """
     Standardizes metadata files for generated Paks.
     - target_dir: Where to dump.
@@ -230,9 +268,13 @@ def dump_metadata(target_dir, mod_name=None, vpk_mods=None, extra_lists=None):
     if config.get("opt_out_vpk_metadata"):
         return
 
+    fs.create_dirs(target_dir)
     # 1. Base Info
     if mod_name is None:
-        shutil.copy(base.mods_config_dir, os.path.join(target_dir, "minify_mods.json"))
+        states = (
+            config.read_json_file(base.mods_config_dir) if selected_mods is None else dict.fromkeys(selected_mods, True)
+        )
+        config.write_json_file(os.path.join(target_dir, "minify_mods.json"), states)
     else:
         open(os.path.join(target_dir, f"{mod_name}.txt"), "w").close()
 

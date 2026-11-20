@@ -71,7 +71,7 @@ def run_pre_build(mod_list):
             log.write_warning("&failed_merge_mod", os.path.basename(map_vpk_paths[-1]))
 
         vpk_utils.dump_metadata(base.merge_dir)
-        vpk.new(base.merge_dir).save(os.path.join(maps_output_dir, "dota.vpk"))
+        vpk_utils.pack(base.merge_dir, os.path.join(maps_output_dir, "dota.vpk"), chunk_size=None)
         fs.remove_path(base.merge_dir)
     else:
         dota_vpk_path = os.path.join(helper.output_path, "maps", "dota.vpk")
