@@ -34,7 +34,7 @@ jobs:
           node-version: "22"
       - name: Build Minify with web UI and plugins
         run: |
-          uv sync --locked
+          uv sync --managed-python --locked
           npm --prefix Minify/ui/web ci
           uv run --no-sync python scripts/build.py
       - name: Test first-run setup without Steam or Wine

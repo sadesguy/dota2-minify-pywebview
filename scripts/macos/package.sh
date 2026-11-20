@@ -81,6 +81,7 @@ ditto --norsrc "$src/Minify" "$contents/MacOS/Minify"
 ditto --norsrc "$src/_internal" "$contents/Frameworks"
 # codesign treats everything in Frameworks as code. Keep Python's data reachable through relative links.
 for item in "$contents/Frameworks"/*; do
+    [[ -L $item ]] && continue # A relative link must stay next to its target.
     [[ -n $(find "$item" \( -name '*.so' -o -name '*.dylib' -o -name '*.framework' \) -print -quit) ]] && continue
     name=${item##*/}
     mv "$item" "$resources/$name"
@@ -132,7 +133,7 @@ for entry in 'Start Minify.command' setup-workshop prepare-workshop check-worksh
 "$portable/Start Minify.command" --skip-setup --version | grep -Fx "$version"
 app="$tmp/extracted/Minify.app"
 lipo "$app/Contents/MacOS/Minify" -verify_arch "$arch"
-codesign --verify --deep --strict "$app"
+codesign --verify --deep --strict --verbose=2 "$app"
 "$app/Contents/MacOS/Minify" --version | grep -Fx "$version"
 workspace="$HOME/Library/Application Support/Dota2-Minify/Workspace"
 [[ ! -e "$workspace/Minify" && ! -e "$workspace/_internal" ]]
